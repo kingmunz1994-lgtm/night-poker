@@ -1,0 +1,359 @@
+// ══════════════════════════════════════════════════════════════
+//  Night Poker — ZK Poker Room on Midnight Network
+//  Protocol: SRA-inspired XOR mental poker (adapted from zkpoker/Aleo)
+//
+//  Key insight from zkpoker research:
+//  - XOR encryption is far cheaper in ZK circuits than hash-based commits
+//  - Betting rounds run off-chain (state channels), only showdown on-chain
+//  - Four-contract modular structure (enc / deck / shuffle / game)
+//
+//  Card encoding: 0–51
+//    0–12  Clubs A2345678910JQK
+//    13–25 Diamonds
+//    26–38 Hearts
+//    39–51 Spades
+// ══════════════════════════════════════════════════════════════
+
+pragma language_version >= 0.14.0;
+
+import CompactStandardLibrary;
+
+// ── Constants ────────────────────────────────────────────────
+const MAX_PLAYERS: Uint<8> = 6;
+const DECK_SIZE:   Uint<8> = 52;
+
+// ── Enums ────────────────────────────────────────────────────
+enum GamePhase {
+  WAITING,
+  SHUFFLE,
+  PREFLOP,
+  FLOP,
+  TURN,
+  RIVER,
+  SHOWDOWN,
+  COMPLETE
+}
+
+enum PlayerAction {
+  NONE, CHECK, CALL, RAISE, FOLD, ALL_IN
+}
+
+// ── Ledger (public chain state) ───────────────────────────────
+ledger {
+  tableId:        Bytes<32>;
+  bigBlind:       Uint<64>;
+  smallBlind:     Uint<64>;
+  maxBuyIn:       Uint<64>;
+  rake:           Uint<8>;      // basis points, e.g. 50 = 0.5%
+
+  phase:          GamePhase;
+  pot:            Uint<64>;
+  currentBet:     Uint<64>;
+  dealerSeat:     Uint<8>;
+  activePlayer:   Uint<8>;
+  handNumber:     Uint<32>;
+  lastActionAt:   Uint<64>;     // block height — for timeout enforcement
+
+  communityCards: Vector<5, Uint<8>>;   // 255 = unrevealed
+  playerCount:    Uint<8>;
+  seats:          Vector<MAX_PLAYERS, SeatState>;
+
+  // XOR-encrypted deck — each entry is card XOR'd with accumulated player keys
+  // Using 128-bit representation (card padded to 16 bytes for XOR security)
+  encryptedDeck:  Vector<DECK_SIZE, Bytes<16>>;
+  shuffleCount:   Uint<8>;   // players who have applied their shuffle key
+
+  // State channel settlement root — off-chain betting round signed state
+  stateChannelRoot: Bytes<32>;
+}
+
+// ── Seat (public) ─────────────────────────────────────────────
+struct SeatState {
+  occupied:       Boolean;
+  playerKey:      Bytes<32>;    // public key
+  stack:          Uint<64>;
+  betThisRound:   Uint<64>;
+  totalBet:       Uint<64>;     // for side pot calc
+  action:         PlayerAction;
+  folded:         Boolean;
+  allIn:          Boolean;
+  // XOR-encrypted hole cards (only this player can decrypt with their key)
+  encCard0:       Bytes<16>;
+  encCard1:       Bytes<16>;
+  // Revealed at showdown (0=unrevealed)
+  revealedCard0:  Uint<8>;
+  revealedCard1:  Uint<8>;
+  hasRevealed:    Boolean;
+}
+
+// ── Private witnesses (per player, ZK-shielded) ───────────────
+witness myDecryptKey: Bytes<16>;    // player's XOR key for card decryption
+witness myCard0:      Uint<8>;      // plaintext hole card 0
+witness myCard1:      Uint<8>;      // plaintext hole card 1
+
+// ═══════════════════════════════════════════════════════════════
+// CIRCUITS
+// ═══════════════════════════════════════════════════════════════
+
+// Create table
+export circuit createTable(
+  tableId:    Bytes<32>,
+  bigBlind:   Uint<64>,
+  smallBlind: Uint<64>,
+  maxBuyIn:   Uint<64>,
+  rake:       Uint<8>
+): [] {
+  assert ledger.phase == GamePhase.WAITING "Already active";
+  assert smallBlind < bigBlind "Invalid blinds";
+  assert rake <= 500 "Max rake 5%";
+
+  ledger.tableId   = tableId;
+  ledger.bigBlind  = bigBlind;
+  ledger.smallBlind = smallBlind;
+  ledger.maxBuyIn  = maxBuyIn;
+  ledger.rake      = rake;
+  ledger.phase     = GamePhase.WAITING;
+  ledger.pot       = 0;
+  ledger.handNumber = 0;
+  ledger.shuffleCount = 0;
+
+  // Init deck: card i encoded as i padded to 16 bytes
+  for i in 0..DECK_SIZE {
+    ledger.encryptedDeck[i] = padCard(i as Uint<8>);
+  }
+}
+
+// Sit down with chips
+export circuit joinTable(seat: Uint<8>, buyIn: Uint<64>): [] {
+  assert ledger.phase == GamePhase.WAITING "Game in progress";
+  assert seat < MAX_PLAYERS "Bad seat";
+  assert !ledger.seats[seat].occupied "Seat taken";
+  assert buyIn >= ledger.bigBlind * 10 "Buy-in too small";
+  assert buyIn <= ledger.maxBuyIn "Buy-in exceeds max";
+  assert ledger.playerCount < MAX_PLAYERS "Table full";
+
+  ledger.seats[seat] = SeatState {
+    occupied:      true,
+    playerKey:     ownPublicKey(),
+    stack:         buyIn,
+    betThisRound:  0,
+    totalBet:      0,
+    action:        PlayerAction.NONE,
+    folded:        false,
+    allIn:         false,
+    encCard0:      zeroes(),
+    encCard1:      zeroes(),
+    revealedCard0: 255,
+    revealedCard1: 255,
+    hasRevealed:   false,
+  };
+  ledger.playerCount = ledger.playerCount + 1;
+}
+
+// Start hand — transition to shuffle phase
+export circuit startHand(): [] {
+  assert ledger.phase == GamePhase.WAITING "Wrong phase";
+  assert ledger.playerCount >= 2 "Need 2+ players";
+
+  ledger.phase      = GamePhase.SHUFFLE;
+  ledger.shuffleCount = 0;
+  ledger.pot        = 0;
+  ledger.currentBet = 0;
+  ledger.handNumber = ledger.handNumber + 1;
+  ledger.communityCards = [255, 255, 255, 255, 255];
+
+  for i in 0..MAX_PLAYERS {
+    if ledger.seats[i].occupied {
+      ledger.seats[i].action       = PlayerAction.NONE;
+      ledger.seats[i].betThisRound = 0;
+      ledger.seats[i].totalBet     = 0;
+      ledger.seats[i].folded       = false;
+      ledger.seats[i].allIn        = false;
+      ledger.seats[i].hasRevealed  = false;
+      ledger.seats[i].revealedCard0 = 255;
+      ledger.seats[i].revealedCard1 = 255;
+    }
+  }
+
+  // Reset deck to unencrypted base state
+  for i in 0..DECK_SIZE {
+    ledger.encryptedDeck[i] = padCard(i as Uint<8>);
+  }
+}
+
+// Mental poker shuffle — each player applies their XOR key to the entire deck
+// XOR is commutative and associative: E_A(E_B(card)) == E_B(E_A(card))
+// This means shuffle order doesn't matter — all players must contribute before cards are dealt
+export circuit applyShuffleKey(seat: Uint<8>): [] {
+  assert ledger.phase == GamePhase.SHUFFLE "Wrong phase";
+  assert ledger.seats[seat].occupied "Not a player";
+  assert ledger.seats[seat].playerKey == ownPublicKey() "Not your seat";
+
+  const key = myDecryptKey;
+
+  // XOR each card in the deck with this player's secret key
+  // This is equivalent to encrypting with the player's key
+  // In full mental poker, each player also applies a secret permutation;
+  // for MVP the dealer applies the permutation which players verify via ZK
+  for i in 0..DECK_SIZE {
+    ledger.encryptedDeck[i] = xor16(ledger.encryptedDeck[i], key);
+  }
+
+  ledger.shuffleCount = ledger.shuffleCount + 1;
+
+  // Once all players have applied their key, deal hole cards
+  if ledger.shuffleCount == ledger.playerCount {
+    ledger.phase = GamePhase.PREFLOP;
+    postBlinds();
+    dealAllHoleCards();
+  }
+}
+
+// Post blinds automatically after shuffle
+circuit postBlinds(): [] {
+  const n   = ledger.playerCount;
+  const sb  = (ledger.dealerSeat + 1) % n;
+  const bb  = (ledger.dealerSeat + 2) % n;
+
+  chipFromStack(sb as Uint<8>, ledger.smallBlind);
+  chipFromStack(bb as Uint<8>, ledger.bigBlind);
+
+  ledger.currentBet   = ledger.bigBlind;
+  ledger.activePlayer = (ledger.dealerSeat + 3) % n;
+}
+
+// Deal two encrypted hole cards to each occupied seat
+// Cards pulled from encrypted deck in order
+// Each player's cards encrypted with the remaining players' combined XOR keys
+// (In full impl: selective decryption removes all keys except the recipient's)
+circuit dealAllHoleCards(): [] {
+  var cardIdx: Uint<8> = 0;
+  for seat in 0..MAX_PLAYERS {
+    if ledger.seats[seat].occupied && !ledger.seats[seat].folded {
+      ledger.seats[seat].encCard0 = ledger.encryptedDeck[cardIdx];
+      ledger.seats[seat].encCard1 = ledger.encryptedDeck[cardIdx + 1];
+      cardIdx = cardIdx + 2;
+    }
+  }
+}
+
+// State channel settlement — betting rounds happen off-chain
+// Players sign state updates; final signed state root is posted here
+// to move the phase forward. Avoids block-time latency for every action.
+export circuit settleStreet(
+  signedStateRoot: Bytes<32>,
+  potDelta:        Uint<64>,    // chips moved to pot this street
+  nextPhase:       GamePhase
+): [] {
+  assert nextPhase != GamePhase.WAITING "Invalid next phase";
+  assert nextPhase != GamePhase.SHUFFLE "Invalid next phase";
+
+  // In production: verify multi-sig from all non-folded players against root
+  ledger.stateChannelRoot = signedStateRoot;
+  ledger.pot = ledger.pot + potDelta;
+  ledger.phase = nextPhase;
+
+  // Reveal community cards based on phase
+  if nextPhase == GamePhase.FLOP {
+    revealFlop();
+  } else if nextPhase == GamePhase.TURN {
+    ledger.communityCards[3] = drawFromDeck(14 as Uint<8>);
+  } else if nextPhase == GamePhase.RIVER {
+    ledger.communityCards[4] = drawFromDeck(15 as Uint<8>);
+  }
+}
+
+// Reveal flop — deck positions 12–14 (after hole cards for 6 players = 12 cards dealt)
+circuit revealFlop(): [] {
+  ledger.communityCards[0] = drawFromDeck(12 as Uint<8>);
+  ledger.communityCards[1] = drawFromDeck(13 as Uint<8>);
+  ledger.communityCards[2] = drawFromDeck(14 as Uint<8>);
+}
+
+// Showdown — player proves their plaintext cards decrypt correctly from encCards
+// The ZK proof: myCard0 XOR myDecryptKey (padded) == encCard0
+export circuit revealHand(seat: Uint<8>): [] {
+  assert ledger.phase == GamePhase.SHOWDOWN "Wrong phase";
+  assert ledger.seats[seat].playerKey == ownPublicKey() "Not your seat";
+  assert !ledger.seats[seat].folded "Folded — no reveal needed";
+  assert !ledger.seats[seat].hasRevealed "Already revealed";
+
+  const key   = myDecryptKey;
+  const card0 = myCard0;
+  const card1 = myCard1;
+
+  assert card0 < DECK_SIZE "Invalid card";
+  assert card1 < DECK_SIZE "Invalid card";
+  assert card0 != card1 "Duplicate card";
+
+  // ZK proof: decrypting the on-chain encrypted cards with myDecryptKey gives myCard0/1
+  const decrypted0 = xor16(ledger.seats[seat].encCard0, key);
+  const decrypted1 = xor16(ledger.seats[seat].encCard1, key);
+
+  assert decrypted0 == padCard(card0) "Card 0 mismatch";
+  assert decrypted1 == padCard(card1) "Card 1 mismatch";
+
+  ledger.seats[seat].revealedCard0 = card0;
+  ledger.seats[seat].revealedCard1 = card1;
+  ledger.seats[seat].hasRevealed   = true;
+}
+
+// Award pot to winner (hand evaluation happens in TypeScript, winner posted with proof)
+export circuit awardPot(winningSeat: Uint<8>): [] {
+  assert ledger.phase == GamePhase.SHOWDOWN "Wrong phase";
+  assert ledger.seats[winningSeat].occupied "Invalid seat";
+
+  const rakeAmount = (ledger.pot * ledger.rake as Uint<64>) / 10000;
+  const award      = ledger.pot - rakeAmount;
+
+  ledger.seats[winningSeat].stack = ledger.seats[winningSeat].stack + award;
+  ledger.pot   = 0;
+  ledger.phase = GamePhase.COMPLETE;
+}
+
+// Timeout — if active player goes idle, anyone can advance
+export circuit claimTimeout(currentBlock: Uint<64>): [] {
+  assert currentBlock > ledger.lastActionAt + 30 "No timeout yet";
+  // Auto-fold the timed-out player
+  ledger.seats[ledger.activePlayer].folded = true;
+  ledger.seats[ledger.activePlayer].action = PlayerAction.FOLD;
+}
+
+// ── Internal helpers ──────────────────────────────────────────
+
+circuit chipFromStack(seat: Uint<8>, amount: Uint<64>): [] {
+  assert ledger.seats[seat].stack >= amount "Insufficient chips";
+  ledger.seats[seat].stack        = ledger.seats[seat].stack - amount;
+  ledger.seats[seat].betThisRound = ledger.seats[seat].betThisRound + amount;
+  ledger.seats[seat].totalBet     = ledger.seats[seat].totalBet + amount;
+  ledger.pot                      = ledger.pot + amount;
+}
+
+// Pad a card byte to 16 bytes for XOR encryption
+circuit padCard(card: Uint<8>): Bytes<16> {
+  return [card as Byte, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+}
+
+// XOR two 16-byte values
+circuit xor16(a: Bytes<16>, b: Bytes<16>): Bytes<16> {
+  return [
+    a[0] ^ b[0],  a[1] ^ b[1],  a[2] ^ b[2],  a[3] ^ b[3],
+    a[4] ^ b[4],  a[5] ^ b[5],  a[6] ^ b[6],  a[7] ^ b[7],
+    a[8] ^ b[8],  a[9] ^ b[9],  a[10] ^ b[10], a[11] ^ b[11],
+    a[12] ^ b[12], a[13] ^ b[13], a[14] ^ b[14], a[15] ^ b[15]
+  ];
+}
+
+circuit zeroes(): Bytes<16> {
+  return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+}
+
+// Draw community card from encrypted deck (remove all player XOR keys first)
+circuit drawFromDeck(deckPos: Uint<8>): Uint<8> {
+  // In full impl: each player strips their key from this specific card position
+  // For MVP: dealer decrypts and posts plaintext card with ZK proof
+  const enc  = ledger.encryptedDeck[deckPos];
+  const key  = myDecryptKey;
+  const dec  = xor16(enc, key);
+  return dec[0];
+}

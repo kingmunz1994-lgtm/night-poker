@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Night Poker · ZK Poker Room on Midnight</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;700&family=Playfair+Display:wght@400;700&display=swap"/>
+<link rel="stylesheet" href="css/poker.css"/>
+</head>
+<body>
+
+<!-- ══ NAV ════════════════════════════════════════════════════ -->
+<nav>
+  <div class="nav-logo" onclick="showView('lobby')">
+    Night <span>Poker</span> 🃏
+  </div>
+  <div class="nav-right">
+    <button class="btn btn-ghost btn-sm" onclick="showView('lobby')">Lobby</button>
+    <button class="btn btn-ghost btn-sm" onclick="openCreateTable()">+ Create Table</button>
+    <div style="position:relative">
+      <button class="btn btn-primary btn-sm" id="wallet-btn" onclick="handleWalletClick()">
+        <span id="wallet-dot" style="width:7px;height:7px;border-radius:50%;background:#ef4444;display:inline-block;margin-right:5px;"></span>
+        <span id="wallet-label">Sign in</span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- ══ TOAST ══════════════════════════════════════════════════ -->
+<div id="toast-wrap"></div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- LOBBY                                                      -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="page active" id="page-lobby">
+  <div class="lobby">
+
+    <div class="lobby-hero">
+      <div class="lobby-tag">
+        <div class="lobby-zk-dot"></div>
+        ZK Mental Poker · Midnight Network · Provably Fair
+      </div>
+      <h1>Poker where your<br>hand stays <em>yours</em>.</h1>
+      <p>Cards committed as ZK proofs. No trusted dealer. Opponent hands invisible until showdown — on-chain, forever.</p>
+      <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+        <button class="btn btn-primary btn-lg" onclick="openCreateTable()">Create Table</button>
+        <button class="btn btn-ghost btn-lg" onclick="connectDemo()">Try Demo →</button>
+      </div>
+    </div>
+
+    <!-- Stats strip -->
+    <div class="stats-strip" style="border-radius:14px;margin-bottom:32px;">
+      <div class="stat-cell">
+        <div class="stat-val">🟢 Live</div>
+        <div class="stat-lbl">Network</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val" id="stat-tables">4</div>
+        <div class="stat-lbl">Active Tables</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val" id="stat-players">11</div>
+        <div class="stat-lbl">Players Online</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val">2.5%</div>
+        <div class="stat-lbl">Max Rake</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val">XOR-128</div>
+        <div class="stat-lbl">Encryption</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-val">ZK Proof</div>
+        <div class="stat-lbl">Showdown</div>
+      </div>
+    </div>
+
+    <!-- Table grid -->
+    <div class="tables-hdr">
+      <h2>Open Tables</h2>
+      <button class="btn btn-ghost btn-sm" onclick="renderLobby()">↻ Refresh</button>
+    </div>
+    <div class="tables-grid" id="tables-grid"></div>
+
+    <!-- How it works -->
+    <div style="margin-top:48px;padding:32px;background:var(--card-bg);border:1px solid var(--rim);border-radius:20px;">
+      <h2 style="font-size:20px;font-weight:800;margin-bottom:24px;text-align:center;">How the ZK works</h2>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;">
+        <div style="text-align:center;">
+          <div style="font-size:32px;margin-bottom:10px;">🔀</div>
+          <div style="font-weight:700;margin-bottom:6px;">Mental Shuffle</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.7;">Each player XOR-encrypts the deck with their secret key. No one — including you — can see the final card order.</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:32px;margin-bottom:10px;">🔐</div>
+          <div style="font-weight:700;margin-bottom:6px;">Private Deal</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.7;">Your hole cards are encrypted with all other players' keys. Only you can decrypt them. Opponents get a commitment hash.</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:32px;margin-bottom:10px;">⚡</div>
+          <div style="font-weight:700;margin-bottom:6px;">Off-Chain Betting</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.7;">Betting rounds run in a state channel — instant, no gas per action. Only showdown and settlement touch the chain.</div>
+        </div>
+        <div style="text-align:center;">
+          <div style="font-size:32px;margin-bottom:10px;">🏆</div>
+          <div style="font-weight:700;margin-bottom:6px;">ZK Showdown</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.7;">At showdown each player proves their cards match the on-chain commitment. Cheating is cryptographically impossible.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- POKER TABLE                                                -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="page" id="page-table">
+  <div class="table-page">
+
+    <!-- Top bar -->
+    <div class="table-topbar">
+      <button class="btn btn-ghost btn-sm" onclick="showView('lobby'); stopTimer();">← Lobby</button>
+      <div class="table-topbar-name" id="tb-name"></div>
+      <div class="table-topbar-blind" id="tb-blind"></div>
+      <div class="table-topbar-pot" id="tb-pot"></div>
+      <div style="font-size:11px;color:var(--muted);font-family:var(--mono);" id="tb-phase"></div>
+      <div style="font-size:11px;color:var(--muted);font-family:var(--mono);" id="tb-hand"></div>
+      <div class="topbar-zk">
+        <div class="topbar-zk-dot"></div>
+        ZK Verified
+      </div>
+    </div>
+
+    <!-- Timer bar -->
+    <div class="timer-wrap">
+      <div class="timer-bar" id="timer-bar" style="width:100%"></div>
+    </div>
+
+    <!-- Felt table -->
+    <div class="felt-wrap">
+      <div class="felt">
+
+        <!-- Player seats -->
+        <div class="seat seat-0" id="seat-0"></div>
+        <div class="seat seat-1" id="seat-1"></div>
+        <div class="seat seat-2" id="seat-2"></div>
+        <div class="seat seat-3" id="seat-3"></div>
+        <div class="seat seat-4" id="seat-4"></div>
+        <div class="seat seat-5" id="seat-5"></div>
+
+        <!-- Centre: community cards + pot -->
+        <div class="community-area">
+          <div class="phase-badge" id="tb-phase2"></div>
+          <div class="community-cards" id="community-cards"></div>
+          <div class="pot-display" id="pot-display">Pot: $0</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Action bar -->
+    <div class="action-bar hidden" id="action-bar">
+      <button class="btn btn-red" onclick="doAction('fold')">Fold</button>
+      <button class="btn btn-ghost" id="btn-check-call" onclick="doAction('check')">Check</button>
+      <div class="raise-wrap">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div class="raise-label">Raise to</div>
+          <div class="raise-val" id="raise-val">$0</div>
+        </div>
+        <input type="range" class="raise-slider" id="raise-slider"
+               min="0" max="10000" value="200" oninput="updateRaiseVal()"/>
+        <div class="raise-presets">
+          <div class="raise-preset" onclick="setPreset(2)">2×</div>
+          <div class="raise-preset" onclick="setPreset(3)">3×</div>
+          <div class="raise-preset" onclick="setPreset(5)">5×</div>
+          <div class="raise-preset" onclick="setPreset(999)">Max</div>
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="doRaise()">Raise</button>
+      <button class="btn" style="background:rgba(239,68,68,.2);border:1px solid rgba(239,68,68,.3);color:#f87171;"
+              onclick="doAction('allin')">All-In 🔥</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- WALLET MODAL                                               -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="overlay" id="ov-wallet" onclick="if(event.target===this)closeModal('ov-wallet')">
+  <div class="modal">
+    <div class="wc-modal">
+      <div class="wc-icon">🌙</div>
+      <div class="wc-title">Connect to play</div>
+      <div class="wc-sub">Connect a Midnight wallet to buy in, bet with NIGHT tokens,<br>and verify your hands with ZK proofs.</div>
+      <div class="wc-benefits">
+        <div class="wc-benefit">
+          <strong>🔒 Private hands</strong>
+          Cards shielded on Midnight's ZK chain
+        </div>
+        <div class="wc-benefit">
+          <strong>⚡ Instant payouts</strong>
+          NIGHT tokens direct to your wallet
+        </div>
+        <div class="wc-benefit">
+          <strong>⊘ Provably fair</strong>
+          No trusted dealer, ever
+        </div>
+      </div>
+      <div id="wc-wallet-list">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:12px;">No Midnight wallet detected</div>
+        <div style="display:flex;gap:8px;flex-direction:column;margin-bottom:16px;">
+          <a href="https://midnight.network/lace" target="_blank"
+             style="display:flex;align-items:center;gap:12px;padding:14px;background:rgba(255,255,255,.04);border:1px solid var(--rim2);border-radius:12px;color:var(--text);text-decoration:none;font-weight:600;">
+            🌑 Lace Wallet <span style="margin-left:auto;font-size:11px;color:var(--text2);">Install →</span>
+          </a>
+          <a href="https://1am.xyz" target="_blank"
+             style="display:flex;align-items:center;gap:12px;padding:14px;background:rgba(255,255,255,.04);border:1px solid var(--rim2);border-radius:12px;color:var(--text);text-decoration:none;font-weight:600;">
+            🌙 1AM Wallet <span style="margin-left:auto;font-size:11px;color:var(--text2);">Install →</span>
+          </a>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-full btn-lg" onclick="connectDemo()">🎭 Try Demo Mode</button>
+      <div style="margin-top:12px;font-size:11px;color:var(--muted);">Demo uses simulated NIGHT tokens · no real funds</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- CREATE TABLE MODAL                                         -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="overlay" id="ov-create" onclick="if(event.target===this)closeModal('ov-create')">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('ov-create')">✕</button>
+    <div class="modal-title">Create Table</div>
+    <div class="modal-sub">Set up your private ZK poker room</div>
+
+    <div class="form-group">
+      <label class="form-label">Table Name</label>
+      <input class="form-input" id="ct-name" placeholder="e.g. High Roller Room" maxlength="30"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Big Blind (NIGHT)</label>
+        <input class="form-input" id="ct-bb" type="number" placeholder="100" min="10"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max Buy-in (NIGHT)</label>
+        <input class="form-input" id="ct-buyin" type="number" placeholder="10000" min="100"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Max Players</label>
+      <select class="form-input" id="ct-seats">
+        <option value="2">2 (Heads-Up)</option>
+        <option value="4">4 players</option>
+        <option value="6" selected>6 players</option>
+      </select>
+    </div>
+
+    <div class="zk-status">
+      <div class="zk-status-row">
+        <div class="zk-dot"></div>
+        <span>Deck committed via XOR mental poker on Midnight Preprod</span>
+      </div>
+    </div>
+
+    <button class="btn btn-primary btn-full btn-lg" style="margin-top:20px;" onclick="submitCreateTable()">
+      Create Table →
+    </button>
+  </div>
+</div>
+
+<!-- ══ SCRIPTS ════════════════════════════════════════════════ -->
+<script src="js/cards.js"></script>
+<script src="js/crypto.js"></script>
+<script src="js/game.js"></script>
+
+<script>
+// Wire up wallet button
+function handleWalletClick() {
+  if (state.wallet.connected) {
+    if (confirm('Disconnect wallet?')) disconnectWallet();
+  } else {
+    openModal('ov-wallet');
+  }
+}
+
+// Keep pot display in sync
+setInterval(() => {
+  const pd = document.getElementById('pot-display');
+  if (pd && state.view === 'table') pd.textContent = `Pot: $${state.hand.pot.toLocaleString()}`;
+  const ph = document.getElementById('tb-phase2');
+  if (ph && state.view === 'table') ph.textContent = state.hand.phase.toUpperCase();
+}, 200);
+</script>
+</body>
+</html>

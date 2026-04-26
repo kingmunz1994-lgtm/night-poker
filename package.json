@@ -1,0 +1,18 @@
+{
+  "name": "night-poker",
+  "version": "0.1.0",
+  "description": "ZK Poker Room on Midnight Network — provably fair, fully private",
+  "scripts": {
+    "dev": "npx serve public -p 3001",
+    "compile": "compactc contracts/poker.compact src/poker_contract/",
+    "build": "cp public/index.html dist/index.html"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "^1.0.0",
+    "@midnight-ntwrk/dapp-connector-api": "^2.0.0",
+    "@midnight-ntwrk/midnight-js-types": "^1.0.0"
+  },
+  "devDependencies": {
+    "serve": "^14.2.0"
+  }
+}
