@@ -1,5 +1,7 @@
 // ── Night Poker — Game State & Logic ─────────────────────────
 
+const REBUY_AMOUNT = 5000;
+
 const DEMO_TABLES = [
   { id: 'tbl-1', name: 'Midnight Lounge',  bigBlind: 100,  smallBlind: 50,   maxBuyIn: 10000,  rake: 50, players: 3, maxPlayers: 6, phase: 'waiting' },
   { id: 'tbl-2', name: 'High Roller Room', bigBlind: 1000, smallBlind: 500,  maxBuyIn: 100000, rake: 25, players: 5, maxPlayers: 6, phase: 'playing' },
@@ -15,6 +17,10 @@ const DEMO_PLAYERS = [
   { name: 'CryptoKid', emoji: '⚡', stack: 2700, seat: 4 },
 ];
 
+// Stacks persist across hands within a session
+const playerStacks = {};
+DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
+
 let state = {
   view: 'lobby',
   wallet: { connected: false, address: null, demo: false, night: 0, dust: 0 },
@@ -23,9 +29,10 @@ let state = {
     phase: 'waiting',
     pot: 0,
     currentBet: 0,
-    communityCards: [null,null,null,null,null],
+    bigBlind: 0,
+    communityCards: [null, null, null, null, null],
     players: [],
-    dealer: 0,
+    dealerSeat: 4,   // rotates before each hand; first hand dealer=0
     activePlayer: -1,
     myHoleCards: [null, null],
     myKey: null,
@@ -91,65 +98,99 @@ function joinTable(id) {
   const tbl = DEMO_TABLES.find(t => t.id === id);
   if (!tbl) return;
   state.table = tbl;
+  // Fresh stacks when joining a new table
+  DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
   showView('table');
   startHand(tbl);
 }
 
 // ── ZK shuffle + deal ─────────────────────────────────────────
 async function startHand(tbl) {
+  const bb = tbl.bigBlind;
+  const sb = tbl.smallBlind;
+
+  // Rotate dealer
+  const prevIdx   = DEMO_PLAYERS.findIndex(p => p.seat === state.hand.dealerSeat);
+  const nextIdx   = (prevIdx + 1) % DEMO_PLAYERS.length;
+  const dealerSeat = DEMO_PLAYERS[nextIdx].seat;
+  const sbSeat    = DEMO_PLAYERS[(nextIdx + 1) % DEMO_PLAYERS.length].seat;
+  const bbSeat    = DEMO_PLAYERS[(nextIdx + 2) % DEMO_PLAYERS.length].seat;
+
+  // Auto-rebuy any player whose stack is too small to post the blind
+  DEMO_PLAYERS.forEach(p => {
+    if ((playerStacks[p.seat] ?? 0) < bb * 2) {
+      playerStacks[p.seat] = REBUY_AMOUNT;
+    }
+  });
+
   state.hand = {
     ...state.hand,
     phase: 'shuffle',
-    pot: tbl.bigBlind + tbl.smallBlind,
-    currentBet: tbl.bigBlind,
-    communityCards: [null,null,null,null,null],
+    pot: 0,
+    currentBet: bb,
+    bigBlind: bb,
+    communityCards: [null, null, null, null, null],
     players: DEMO_PLAYERS.map(p => ({
-      ...p, bet: 0, action: null, folded: false, allin: false,
-      cards: p.isYou ? null : ['back','back'],
+      ...p,
+      stack: playerStacks[p.seat],
+      bet: 0, action: null, folded: false, allin: false,
+      cards: p.isYou ? null : ['back', 'back'],
     })),
-    dealer: 0,
-    activePlayer: -1,
-    myHoleCards: [null,null],
+    dealerSeat,
+    activePlayer: 3,
+    myHoleCards: [null, null],
     myCommitment: null,
     handNum: state.hand.handNum + 1,
     winner: null,
     zkProofVerified: false,
   };
+
+  // Post blinds to correct seats
+  const sbPlayer = state.hand.players.find(p => p.seat === sbSeat);
+  const bbPlayer = state.hand.players.find(p => p.seat === bbSeat);
+  if (sbPlayer) {
+    const amt = Math.min(sb, sbPlayer.stack);
+    sbPlayer.bet = amt; sbPlayer.stack -= amt;
+    if (sbPlayer.stack === 0) sbPlayer.allin = true;
+  }
+  if (bbPlayer) {
+    const amt = Math.min(bb, bbPlayer.stack);
+    bbPlayer.bet = amt; bbPlayer.stack -= amt;
+    if (bbPlayer.stack === 0) bbPlayer.allin = true;
+  }
+  state.hand.pot = (sbPlayer?.bet ?? 0) + (bbPlayer?.bet ?? 0);
+
   renderTable();
 
-  // Step 1: generate / load XOR key
+  // Step 1: XOR key
   state.hand.myKey = poker_crypto.loadOrGenerateKey(tbl.id);
   const keyHex = poker_crypto.toHex(state.hand.myKey);
-  toast(`🔑 Your key: 0x${keyHex.slice(0,8)}…`, 'info');
+  toast(`🔑 Your key: 0x${keyHex.slice(0, 8)}…`, 'info');
   await delay(700);
 
-  // Step 2: shuffle with real crypto.getRandomValues Fisher-Yates
-  const deck = Array.from({length:52}, (_,i) => i);
+  // Step 2: Fisher-Yates shuffle
+  const deck = Array.from({length: 52}, (_, i) => i);
   const shuffled = poker_crypto.shuffle(deck);
   toast('🔀 Shuffling with your ZK key…', 'info');
-  await delay(700);
-
-  // Step 3: XOR-encrypt entire shuffled deck
-  const encDeck = poker_crypto.encryptDeck(shuffled);
-  toast('🔐 Deck encrypted · committed to Midnight…', 'info');
   await delay(600);
 
-  // Step 4: deal our hole cards — decrypt slots 0 and 1
+  // Step 3: XOR-encrypt deck
+  const encDeck = poker_crypto.encryptDeck(shuffled);
+  toast('🔐 Deck encrypted · committed to Midnight…', 'info');
+  await delay(500);
+
+  // Step 4: deal hole cards
   const myCards = [
     poker_crypto.decrypt(encDeck[0]),
     poker_crypto.decrypt(encDeck[1]),
   ];
 
-  // Step 5: SHA-256 commitment (simulates on-chain ZK commitment)
+  // Step 5: SHA-256 commitment
   const nonce = crypto.getRandomValues(new Uint8Array(8));
   const commitHash = await poker_crypto.hashCommit(myCards[0], [...nonce]);
   state.hand.myCommitment = poker_crypto.toHex(commitHash).slice(0, 16);
-  toast(`✓ Hand committed: 0x${state.hand.myCommitment}…`, 'success');
-  await delay(500);
-
-  // Post blinds
-  state.hand.players[1].bet = tbl.smallBlind; state.hand.players[1].stack -= tbl.smallBlind;
-  state.hand.players[2].bet = tbl.bigBlind;   state.hand.players[2].stack -= tbl.bigBlind;
+  toast(`✓ Committed: 0x${state.hand.myCommitment}…`, 'success');
+  await delay(400);
 
   state.hand.myHoleCards = myCards;
   state.hand.players.find(p => p.isYou).cards = myCards;
@@ -175,8 +216,8 @@ function doAction(action) {
   } else if (action === 'call') {
     const toCall = Math.min(state.hand.currentBet - me.bet, me.stack);
     me.stack -= toCall; me.bet += toCall; state.hand.pot += toCall;
-    me.action = 'call';
-    toast(`You called $${toCall.toLocaleString()}`, 'info');
+    if (me.stack === 0) { me.allin = true; me.action = 'allin'; toast(`You called $${toCall.toLocaleString()} · All-in!`, 'info'); }
+    else                { me.action = 'call'; toast(`You called $${toCall.toLocaleString()}`, 'info'); }
   } else if (action === 'allin') {
     state.hand.pot += me.stack;
     me.bet += me.stack; me.stack = 0;
@@ -185,6 +226,7 @@ function doAction(action) {
     toast('All-in! 🔥', 'success');
   }
 
+  renderTable();
   setTimeout(() => runOpponentActions(), 800);
 }
 
@@ -192,39 +234,63 @@ function doRaise() {
   const slider = document.getElementById('raise-slider');
   const me = state.hand.players.find(p => p.isYou);
   if (!slider || !me) return;
-  const amt = parseInt(slider.value);
+  const amt     = parseInt(slider.value);
   const toRaise = amt - me.bet;
-  if (toRaise > me.stack) { toast('Not enough chips','error'); return; }
+  if (toRaise <= 0 || toRaise > me.stack) { toast('Not enough chips', 'error'); return; }
   stopTimer();
-  me.stack -= toRaise; me.bet += toRaise; state.hand.pot += toRaise;
+  me.stack -= toRaise; me.bet = amt; state.hand.pot += toRaise;
   state.hand.currentBet = amt;
-  me.action = 'raise';
+  if (me.stack === 0) { me.allin = true; me.action = 'allin'; }
+  else                { me.action = 'raise'; }
   toast(`You raised to $${amt.toLocaleString()}`, 'success');
+  renderTable();
   setTimeout(() => runOpponentActions(), 800);
 }
 
+// ── Opponent AI ───────────────────────────────────────────────
 function runOpponentActions() {
   const active = state.hand.players.filter(p => !p.isYou && !p.folded);
   let i = 0;
   const tick = () => {
     if (i >= active.length) { advanceStreet(); return; }
     const opp = active[i++];
+
+    if (opp.allin) { renderTable(); setTimeout(tick, 300); return; }
+
+    const toCall = Math.min(state.hand.currentBet - opp.bet, opp.stack);
     const r = Math.random();
+
     if (r < 0.15) {
+      // Fold
       opp.folded = true; opp.action = 'fold';
-    } else if (r < 0.65) {
-      const toCall = Math.min(state.hand.currentBet - opp.bet, opp.stack);
+    } else if (r < 0.82 || toCall === 0) {
+      // Call / check
       opp.stack -= toCall; opp.bet += toCall; state.hand.pot += toCall;
-      opp.action = 'call';
+      if (opp.stack === 0) { opp.allin = true; opp.action = 'allin'; }
+      else { opp.action = toCall === 0 ? 'check' : 'call'; }
     } else {
-      opp.action = 'check';
+      // Raise (18% chance, capped at 2× current bet or all-in)
+      const maxBet  = opp.stack + opp.bet;
+      const raiseTo = Math.min(Math.max(state.hand.currentBet * 2, state.hand.bigBlind * 4), maxBet);
+      const toAdd   = raiseTo - opp.bet;
+      if (toAdd > 0 && toAdd <= opp.stack) {
+        opp.stack -= toAdd; opp.bet = raiseTo; state.hand.pot += toAdd;
+        state.hand.currentBet = raiseTo;
+        opp.action = 'raise';
+      } else {
+        opp.stack -= toCall; opp.bet += toCall; state.hand.pot += toCall;
+        if (opp.stack === 0) { opp.allin = true; opp.action = 'allin'; }
+        else { opp.action = toCall === 0 ? 'check' : 'call'; }
+      }
     }
+
     renderTable();
     setTimeout(tick, 550);
   };
   tick();
 }
 
+// ── Street transitions ────────────────────────────────────────
 function advanceStreet() {
   const phase  = state.hand.phase;
   const active = state.hand.players.filter(p => !p.folded);
@@ -234,15 +300,14 @@ function advanceStreet() {
 
   if (active.length === 1) { endHand(active[0]); return; }
 
-  // Use real shuffle for community cards too
-  const used = new Set([...state.hand.myHoleCards, ...state.hand.communityCards.filter(Boolean)]);
+  const used = new Set([...state.hand.myHoleCards, ...state.hand.communityCards.filter(c => c !== null)]);
   const freshCards = () => poker_crypto.shuffle(
-    Array.from({length:52},(_,i)=>i).filter(c=>!used.has(c))
+    Array.from({length: 52}, (_, i) => i).filter(c => !used.has(c))
   );
 
   if (phase === 'preflop') {
     const c = freshCards();
-    [0,1,2].forEach(i => { state.hand.communityCards[i] = c[i]; used.add(c[i]); });
+    [0, 1, 2].forEach(i => { state.hand.communityCards[i] = c[i]; used.add(c[i]); });
     state.hand.phase = 'flop';
     toast('🃏 Flop', 'info');
   } else if (phase === 'flop') {
@@ -257,22 +322,33 @@ function advanceStreet() {
     toast('🃏 River', 'info');
   } else if (phase === 'river') {
     state.hand.phase = 'showdown';
-    runShowdown(); return;
+    runShowdown();
+    return;
   }
 
-  state.hand.activePlayer = state.hand.players.find(p => !p.folded && !p.allin)?.seat ?? -1;
-  renderTable();
-  startTimer();
+  const me = state.hand.players.find(p => p.isYou);
+  if (me && !me.folded && !me.allin) {
+    state.hand.activePlayer = me.seat;
+    renderTable();
+    startTimer();
+  } else {
+    // You've folded or are all-in — opponents play it out automatically
+    state.hand.activePlayer = state.hand.players.find(p => !p.folded && !p.allin)?.seat ?? -1;
+    renderTable();
+    setTimeout(() => runOpponentActions(), 1100);
+  }
 }
 
+// ── Showdown ──────────────────────────────────────────────────
 async function runShowdown() {
   toast('🔓 Verifying ZK commitments…', 'info');
   await delay(900);
 
-  const used = new Set([...state.hand.myHoleCards, ...state.hand.communityCards.filter(Boolean)]);
+  // Reveal opponent hole cards from remaining deck
+  const used = new Set([...state.hand.myHoleCards, ...state.hand.communityCards.filter(c => c !== null)]);
   state.hand.players.forEach(p => {
     if (!p.isYou && !p.folded && p.cards[0] === 'back') {
-      const avail = poker_crypto.shuffle(Array.from({length:52},(_,i)=>i).filter(c=>!used.has(c)));
+      const avail = poker_crypto.shuffle(Array.from({length: 52}, (_, i) => i).filter(c => !used.has(c)));
       p.cards = [avail[0], avail[1]];
       used.add(avail[0]); used.add(avail[1]);
     }
@@ -280,9 +356,9 @@ async function runShowdown() {
 
   state.hand.zkProofVerified = true;
   toast('✓ All commitments verified on Midnight', 'success');
-  await delay(500);
+  await delay(600);
 
-  const community = state.hand.communityCards.filter(Boolean);
+  const community  = state.hand.communityCards.filter(c => c !== null);
   const contenders = state.hand.players
     .filter(p => !p.folded && Array.isArray(p.cards) && typeof p.cards[0] === 'number')
     .map(p => ({ ...p, holeCards: p.cards, communityCards: community }));
@@ -292,16 +368,40 @@ async function runShowdown() {
   state.hand.winner = winner;
 
   renderTable();
-  toast(`🏆 ${winner.name} wins with ${winner.ev.name}!`, 'success');
-  endHand(winner);
+
+  const potAmt = state.hand.pot;
+  if (winners.length > 1) {
+    toast(`🤝 Split pot! ${winners.map(w => w.name).join(' & ')} chop $${potAmt.toLocaleString()} with ${winner.ev.name}`, 'success');
+  } else {
+    toast(`🏆 ${winner.name} wins $${potAmt.toLocaleString()} with ${winner.ev.name}!`, 'success');
+  }
+
+  await delay(600);
+
+  // Award each winner their share
+  const share = Math.floor(potAmt / winners.length);
+  winners.forEach(w => {
+    const p = state.hand.players.find(pl => pl.seat === w.seat);
+    if (p) p.stack += share;
+  });
+  state.hand.pot = 0;
+
+  endHand();
 }
 
-function endHand(winner) {
-  winner.stack += state.hand.pot;
-  state.hand.pot = 0;
+function endHand(walkoverWinner) {
+  if (walkoverWinner) {
+    walkoverWinner.stack += state.hand.pot;
+    state.hand.pot = 0;
+    toast(`🏆 ${walkoverWinner.name} wins!`, 'success');
+  }
+
+  // Persist stacks for next hand
+  state.hand.players.forEach(p => { playerStacks[p.seat] = p.stack; });
+
   state.hand.phase = 'complete';
   renderTable();
-  setTimeout(() => { if (state.view === 'table') startHand(state.table); }, 4500);
+  setTimeout(() => { if (state.view === 'table') startHand(state.table); }, 3800);
 }
 
 // ── Timer ─────────────────────────────────────────────────────
@@ -342,6 +442,7 @@ function disconnectWallet() {
   state.wallet = { connected: false, address: null, demo: false, night: 0, dust: 0 };
   updateWalletUI();
   showView('lobby');
+  stopTimer();
   toast('Wallet disconnected', 'info');
 }
 
@@ -351,7 +452,7 @@ function updateWalletUI() {
   if (!dot || !lbl) return;
   if (state.wallet.connected) {
     dot.style.background = '#00d68f';
-    lbl.textContent = state.wallet.demo ? '🎭 Demo' : state.wallet.address.slice(0,12) + '…';
+    lbl.textContent = state.wallet.demo ? '🎭 Demo' : state.wallet.address.slice(0, 12) + '…';
   } else {
     dot.style.background = '#ef4444';
     lbl.textContent = 'Sign in';
@@ -371,7 +472,7 @@ function submitCreateTable() {
   const name     = document.getElementById('ct-name').value.trim();
   const bigBlind = parseInt(document.getElementById('ct-bb').value);
   const maxBuyIn = parseInt(document.getElementById('ct-buyin').value);
-  if (!name || !bigBlind || !maxBuyIn) { toast('Fill in all fields','error'); return; }
+  if (!name || !bigBlind || !maxBuyIn) { toast('Fill in all fields', 'error'); return; }
   DEMO_TABLES.unshift({
     id: 'tbl-' + Date.now(), name, bigBlind,
     smallBlind: Math.floor(bigBlind / 2), maxBuyIn,
@@ -402,7 +503,7 @@ function renderTopbar() {
 function renderSeats() {
   const h = state.hand;
   for (let i = 0; i < 6; i++) {
-    const p = h.players.find(pl => pl.seat === i);
+    const p   = h.players.find(pl => pl.seat === i);
     const wrap = document.getElementById(`seat-${i}`);
     if (!wrap) continue;
 
@@ -412,8 +513,9 @@ function renderSeats() {
       continue;
     }
 
-    const isActive = h.activePlayer === p.seat && ['preflop','flop','turn','river'].includes(h.phase);
-    const isDealer = h.dealer === p.seat;
+    const isActive = h.activePlayer === p.seat && ['preflop', 'flop', 'turn', 'river'].includes(h.phase);
+    const isDealer = h.dealerSeat === p.seat;
+    const isWinner = h.winner?.seat === p.seat || (h.phase === 'complete' && h.winner?.seat === p.seat);
     const actionLbl = p.action ? (p.action === 'allin' ? 'ALL-IN' : p.action.toUpperCase()) : '';
 
     let cardHtml = '';
@@ -423,22 +525,21 @@ function renderSeats() {
       cardHtml = p.cards.map(c => renderCardSm(c, c === 'back')).join('');
     }
 
-    const zkBadge = h.zkProofVerified && !p.isYou && !p.folded
-      ? `<div class="zk-proof-badge">✓ ZK</div>` : '';
-    const commitHtml = p.isYou && h.myCommitment
-      ? `<div class="commit-hash">0x${h.myCommitment}…</div>` : '';
+    const zkBadge    = h.zkProofVerified && !p.isYou && !p.folded ? `<div class="zk-proof-badge">✓ ZK</div>` : '';
+    const commitHtml = p.isYou && h.myCommitment ? `<div class="commit-hash">0x${h.myCommitment}…</div>` : '';
+    const winnerGlow  = isWinner ? ' style="box-shadow:0 0 22px #fbbf24,0 0 6px #fbbf24;"' : '';
 
-    wrap.className = `seat seat-${i}`;
+    wrap.className = `seat seat-${i}${p.folded ? ' seat-folded' : ''}`;
     wrap.innerHTML = `
       <div class="seat-cards">${cardHtml}${zkBadge}</div>
       ${commitHtml}
-      <div class="seat-avatar${isActive?' active':''}${p.folded?' folded':''}${p.isYou?' you':''}">
-        ${p.emoji}${isDealer?'<div class="dealer-chip">D</div>':''}
+      <div class="seat-avatar${isActive ? ' active' : ''}${p.folded ? ' folded' : ''}${p.isYou ? ' you' : ''}"${winnerGlow}>
+        ${p.emoji}${isDealer ? '<div class="dealer-chip">D</div>' : ''}
       </div>
-      <div class="seat-name">${p.name}${p.isYou?' (You)':''}</div>
+      <div class="seat-name">${p.name}${p.isYou ? ' (You)' : ''}</div>
       <div class="seat-stack">$${p.stack.toLocaleString()}</div>
-      ${p.bet>0?`<div class="seat-bet">Bet: $${p.bet.toLocaleString()}</div>`:''}
-      ${actionLbl?`<div class="seat-action-badge sab-${p.action}">${actionLbl}</div>`:''}
+      ${p.bet > 0 ? `<div class="seat-bet">Bet: $${p.bet.toLocaleString()}</div>` : ''}
+      ${actionLbl ? `<div class="seat-action-badge sab-${p.action}">${actionLbl}</div>` : ''}
     `;
   }
 }
@@ -446,9 +547,14 @@ function renderSeats() {
 function renderCommunityCards() {
   const cc = document.getElementById('community-cards');
   if (!cc) return;
-  cc.innerHTML = state.hand.communityCards.map((c, i) => {
-    if (i === 3 && !['turn','river','showdown','complete'].includes(state.hand.phase)) return '';
-    if (i === 4 && !['river','showdown','complete'].includes(state.hand.phase)) return '';
+  const h = state.hand;
+  const showFlop  = ['flop', 'turn', 'river', 'showdown', 'complete'].includes(h.phase);
+  const showTurn  = ['turn', 'river', 'showdown', 'complete'].includes(h.phase);
+  const showRiver = ['river', 'showdown', 'complete'].includes(h.phase);
+  cc.innerHTML = h.communityCards.map((c, i) => {
+    if (i < 3 && !showFlop)   return '';
+    if (i === 3 && !showTurn)  return '';
+    if (i === 4 && !showRiver) return '';
     return renderCard(c);
   }).join('');
 }
@@ -458,14 +564,15 @@ function renderActionBar() {
   if (!bar) return;
   const h  = state.hand;
   const me = h.players.find(p => p.isYou);
-  const myTurn = me && !me.folded && h.activePlayer === me.seat;
-  const inPlay = ['preflop','flop','turn','river'].includes(h.phase);
+  const myTurn = me && !me.folded && !me.allin && h.activePlayer === me.seat;
+  const inPlay = ['preflop', 'flop', 'turn', 'river'].includes(h.phase);
   bar.classList.toggle('hidden', !myTurn || !inPlay);
   if (!myTurn || !inPlay) return;
 
   const toCall   = Math.max(0, h.currentBet - (me.bet || 0));
   const canCheck = toCall === 0;
-  const minRaise = Math.max(h.currentBet * 2, h.currentBet + 1);
+  const maxBet   = me.stack + (me.bet || 0);
+  const minRaise = Math.min(Math.max(h.currentBet * 2, h.bigBlind * 2), maxBet);
 
   const ccBtn = document.getElementById('btn-check-call');
   if (ccBtn) {
@@ -475,8 +582,11 @@ function renderActionBar() {
 
   const slider = document.getElementById('raise-slider');
   if (slider) {
-    slider.min = minRaise; slider.max = me.stack;
-    slider.value = Math.min(minRaise * 2, me.stack);
+    slider.min   = minRaise;
+    slider.max   = maxBet;
+    if (parseInt(slider.value) < minRaise || parseInt(slider.value) > maxBet) {
+      slider.value = Math.min(minRaise * 2, maxBet);
+    }
     updateRaiseVal();
   }
 }
@@ -491,7 +601,11 @@ function setPreset(multiplier) {
   const me     = state.hand.players.find(p => p.isYou);
   const slider = document.getElementById('raise-slider');
   if (!me || !slider) return;
-  slider.value = Math.min(Math.floor(state.hand.currentBet * multiplier), me.stack);
+  const maxBet = me.stack + (me.bet || 0);
+  const target = multiplier >= 100
+    ? maxBet
+    : Math.min(Math.floor(state.hand.currentBet * multiplier), maxBet);
+  slider.value = Math.max(parseInt(slider.min), target);
   updateRaiseVal();
 }
 

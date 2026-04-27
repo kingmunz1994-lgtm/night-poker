@@ -422,6 +422,8 @@ nav {
 .sab-check  { background: rgba(156,163,175,.1); color: var(--text2); }
 .sab-call   { background: rgba(6,182,212,.1);  color: var(--cyan); }
 .sab-raise  { background: rgba(245,197,24,.12); color: var(--gold); }
+.sab-allin  { background: rgba(239,68,68,.25); color: #f87171; }
+.seat-folded { opacity: .45; pointer-events: none; }
 .sab-allin  { background: rgba(239,68,68,.2);  color: #f87171; font-size: 8px; }
 
 /* Hole cards (your hand) */
