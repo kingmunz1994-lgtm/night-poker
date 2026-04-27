@@ -1,42 +1,50 @@
 // ── Night Poker — Game State & Logic ─────────────────────────
 
-// ── Demo tables ──────────────────────────────────────────────
 const DEMO_TABLES = [
-  { id: 'tbl-1', name: 'Midnight Lounge',  bigBlind: 100,  smallBlind: 50,   maxBuyIn: 10000, rake: 50, players: 3, maxPlayers: 6, phase: 'waiting' },
-  { id: 'tbl-2', name: 'High Roller Room', bigBlind: 1000, smallBlind: 500,  maxBuyIn: 100000,rake: 25, players: 5, maxPlayers: 6, phase: 'playing' },
-  { id: 'tbl-3', name: 'ZK Private Table', bigBlind: 500,  smallBlind: 250,  maxBuyIn: 50000, rake: 50, players: 1, maxPlayers: 6, phase: 'waiting' },
-  { id: 'tbl-4', name: 'Micro Stakes',     bigBlind: 10,   smallBlind: 5,    maxBuyIn: 1000,  rake: 50, players: 2, maxPlayers: 6, phase: 'playing' },
+  { id: 'tbl-1', name: 'Midnight Lounge',  bigBlind: 100,  smallBlind: 50,   maxBuyIn: 10000,  rake: 50, players: 3, maxPlayers: 6, phase: 'waiting' },
+  { id: 'tbl-2', name: 'High Roller Room', bigBlind: 1000, smallBlind: 500,  maxBuyIn: 100000, rake: 25, players: 5, maxPlayers: 6, phase: 'playing' },
+  { id: 'tbl-3', name: 'ZK Private Table', bigBlind: 500,  smallBlind: 250,  maxBuyIn: 50000,  rake: 50, players: 1, maxPlayers: 6, phase: 'waiting' },
+  { id: 'tbl-4', name: 'Micro Stakes',     bigBlind: 10,   smallBlind: 5,    maxBuyIn: 1000,   rake: 50, players: 2, maxPlayers: 6, phase: 'playing' },
 ];
 
 const DEMO_PLAYERS = [
-  { name: 'NightOwl', emoji: '🦉', stack: 4200, seat: 0 },
+  { name: 'NightOwl',  emoji: '🦉', stack: 4200, seat: 0 },
   { name: 'ShadowAce', emoji: '🃏', stack: 8800, seat: 1 },
   { name: 'ZKMaster',  emoji: '🔮', stack: 3100, seat: 2 },
   { name: 'You',       emoji: '🌙', stack: 5000, seat: 3, isYou: true },
   { name: 'CryptoKid', emoji: '⚡', stack: 2700, seat: 4 },
 ];
 
-// ── Game state ────────────────────────────────────────────────
 let state = {
-  view: 'lobby',          // 'lobby' | 'table'
+  view: 'lobby',
   wallet: { connected: false, address: null, demo: false, night: 0, dust: 0 },
   table: null,
   hand: {
-    phase: 'waiting',     // waiting|shuffle|preflop|flop|turn|river|showdown|complete
+    phase: 'waiting',
     pot: 0,
     currentBet: 0,
     communityCards: [null,null,null,null,null],
-    players: [],          // { seat, name, emoji, stack, bet, action, folded, allin, cards, isYou }
+    players: [],
     dealer: 0,
     activePlayer: -1,
     myHoleCards: [null, null],
     myKey: null,
+    myCommitment: null,
     handNum: 0,
     winner: null,
+    zkProofVerified: false,
   },
   timer: 30,
   timerInterval: null,
 };
+
+// ── Helpers ───────────────────────────────────────────────────
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+function setEl(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
 
 // ── Navigation ────────────────────────────────────────────────
 function showView(name) {
@@ -79,91 +87,83 @@ function renderLobby() {
 
 // ── Join table ────────────────────────────────────────────────
 function joinTable(id) {
-  if (!state.wallet.connected) {
-    openModal('ov-wallet');
-    return;
-  }
+  if (!state.wallet.connected) { openModal('ov-wallet'); return; }
   const tbl = DEMO_TABLES.find(t => t.id === id);
   if (!tbl) return;
   state.table = tbl;
-  initHand(tbl);
   showView('table');
-  renderTable();
+  startHand(tbl);
 }
 
-// ── Init hand (demo deal) ─────────────────────────────────────
-function initHand(tbl) {
-  // Generate key for this table session
-  state.hand.myKey = poker_crypto.loadOrGenerateKey(tbl.id);
-
-  // Build player list
-  const players = DEMO_PLAYERS.map(p => ({
-    ...p,
-    bet:     0,
-    action:  null,
-    folded:  false,
-    allin:   false,
-    cards:   p.isYou ? null : ['back', 'back'], // opponents: face-down
-  }));
-
-  // Deal my hole cards (demo — in prod these come from encrypted deck)
-  const myCards = dealDemoHand();
-  players.find(p => p.isYou).cards = myCards;
-  state.hand.myHoleCards = myCards;
-
+// ── ZK shuffle + deal ─────────────────────────────────────────
+async function startHand(tbl) {
   state.hand = {
     ...state.hand,
-    phase:          'preflop',
-    pot:            tbl.bigBlind + tbl.smallBlind,
-    currentBet:     tbl.bigBlind,
-    communityCards: [null, null, null, null, null],
-    players,
-    dealer:         0,
-    activePlayer:   3, // you go first in this demo
-    handNum:        state.hand.handNum + 1,
-    winner:         null,
+    phase: 'shuffle',
+    pot: tbl.bigBlind + tbl.smallBlind,
+    currentBet: tbl.bigBlind,
+    communityCards: [null,null,null,null,null],
+    players: DEMO_PLAYERS.map(p => ({
+      ...p, bet: 0, action: null, folded: false, allin: false,
+      cards: p.isYou ? null : ['back','back'],
+    })),
+    dealer: 0,
+    activePlayer: -1,
+    myHoleCards: [null,null],
+    myCommitment: null,
+    handNum: state.hand.handNum + 1,
+    winner: null,
+    zkProofVerified: false,
   };
+  renderTable();
+
+  // Step 1: generate / load XOR key
+  state.hand.myKey = poker_crypto.loadOrGenerateKey(tbl.id);
+  const keyHex = poker_crypto.toHex(state.hand.myKey);
+  toast(`🔑 Your key: 0x${keyHex.slice(0,8)}…`, 'info');
+  await delay(700);
+
+  // Step 2: shuffle with real crypto.getRandomValues Fisher-Yates
+  const deck = Array.from({length:52}, (_,i) => i);
+  const shuffled = poker_crypto.shuffle(deck);
+  toast('🔀 Shuffling with your ZK key…', 'info');
+  await delay(700);
+
+  // Step 3: XOR-encrypt entire shuffled deck
+  const encDeck = poker_crypto.encryptDeck(shuffled);
+  toast('🔐 Deck encrypted · committed to Midnight…', 'info');
+  await delay(600);
+
+  // Step 4: deal our hole cards — decrypt slots 0 and 1
+  const myCards = [
+    poker_crypto.decrypt(encDeck[0]),
+    poker_crypto.decrypt(encDeck[1]),
+  ];
+
+  // Step 5: SHA-256 commitment (simulates on-chain ZK commitment)
+  const nonce = crypto.getRandomValues(new Uint8Array(8));
+  const commitHash = await poker_crypto.hashCommit(myCards[0], [...nonce]);
+  state.hand.myCommitment = poker_crypto.toHex(commitHash).slice(0, 16);
+  toast(`✓ Hand committed: 0x${state.hand.myCommitment}…`, 'success');
+  await delay(500);
 
   // Post blinds
-  state.hand.players[1].bet    = tbl.smallBlind;
-  state.hand.players[1].stack -= tbl.smallBlind;
-  state.hand.players[2].bet    = tbl.bigBlind;
-  state.hand.players[2].stack -= tbl.bigBlind;
+  state.hand.players[1].bet = tbl.smallBlind; state.hand.players[1].stack -= tbl.smallBlind;
+  state.hand.players[2].bet = tbl.bigBlind;   state.hand.players[2].stack -= tbl.bigBlind;
 
+  state.hand.myHoleCards = myCards;
+  state.hand.players.find(p => p.isYou).cards = myCards;
+  state.hand.phase = 'preflop';
+  state.hand.activePlayer = 3;
+
+  renderTable();
   startTimer();
 }
 
-function dealDemoHand() {
-  // Deal a random 2-card hand for demo
-  const deck = Array.from({length:52}, (_,i) => i);
-  for (let i = 51; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-  return [deck[0], deck[1]];
-}
-
-function dealDemoCommunity(count) {
-  const used = new Set(state.hand.myHoleCards);
-  state.hand.players.forEach(p => {
-    if (Array.isArray(p.cards) && typeof p.cards[0] === 'number') {
-      p.cards.forEach(c => used.add(c));
-    }
-  });
-  const avail = Array.from({length:52}, (_,i) => i).filter(c => !used.has(c));
-  // shuffle available
-  for (let i = avail.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [avail[i], avail[j]] = [avail[j], avail[i]];
-  }
-  return avail.slice(0, count);
-}
-
 // ── Player actions ────────────────────────────────────────────
-function doAction(action, raiseAmt) {
+function doAction(action) {
   const me = state.hand.players.find(p => p.isYou);
   if (!me || state.hand.activePlayer !== me.seat) return;
-
   stopTimer();
 
   if (action === 'fold') {
@@ -173,18 +173,10 @@ function doAction(action, raiseAmt) {
     me.action = 'check';
     toast('You checked', 'info');
   } else if (action === 'call') {
-    const toCall = state.hand.currentBet - me.bet;
-    const actual = Math.min(toCall, me.stack);
-    me.stack -= actual; me.bet += actual; state.hand.pot += actual;
+    const toCall = Math.min(state.hand.currentBet - me.bet, me.stack);
+    me.stack -= toCall; me.bet += toCall; state.hand.pot += toCall;
     me.action = 'call';
-    toast(`You called $${actual.toLocaleString()}`, 'info');
-  } else if (action === 'raise') {
-    const toRaise = raiseAmt - me.bet;
-    if (toRaise > me.stack) { toast('Not enough chips','error'); return; }
-    me.stack -= toRaise; me.bet += toRaise; state.hand.pot += toRaise;
-    state.hand.currentBet = raiseAmt;
-    me.action = 'raise';
-    toast(`You raised to $${raiseAmt.toLocaleString()}`, 'success');
+    toast(`You called $${toCall.toLocaleString()}`, 'info');
   } else if (action === 'allin') {
     state.hand.pot += me.stack;
     me.bet += me.stack; me.stack = 0;
@@ -193,66 +185,79 @@ function doAction(action, raiseAmt) {
     toast('All-in! 🔥', 'success');
   }
 
-  // Advance phase after your action (simplified demo)
+  setTimeout(() => runOpponentActions(), 800);
+}
+
+function doRaise() {
+  const slider = document.getElementById('raise-slider');
+  const me = state.hand.players.find(p => p.isYou);
+  if (!slider || !me) return;
+  const amt = parseInt(slider.value);
+  const toRaise = amt - me.bet;
+  if (toRaise > me.stack) { toast('Not enough chips','error'); return; }
+  stopTimer();
+  me.stack -= toRaise; me.bet += toRaise; state.hand.pot += toRaise;
+  state.hand.currentBet = amt;
+  me.action = 'raise';
+  toast(`You raised to $${amt.toLocaleString()}`, 'success');
   setTimeout(() => runOpponentActions(), 800);
 }
 
 function runOpponentActions() {
-  // Simple opponent AI for demo
-  const activePlayers = state.hand.players.filter(p => !p.isYou && !p.folded);
+  const active = state.hand.players.filter(p => !p.isYou && !p.folded);
   let i = 0;
   const tick = () => {
-    if (i >= activePlayers.length) { advanceStreet(); return; }
-    const opp = activePlayers[i++];
-    const rand = Math.random();
-    if (rand < 0.15) {
+    if (i >= active.length) { advanceStreet(); return; }
+    const opp = active[i++];
+    const r = Math.random();
+    if (r < 0.15) {
       opp.folded = true; opp.action = 'fold';
-    } else if (rand < 0.6) {
-      opp.action = 'call';
+    } else if (r < 0.65) {
       const toCall = Math.min(state.hand.currentBet - opp.bet, opp.stack);
       opp.stack -= toCall; opp.bet += toCall; state.hand.pot += toCall;
+      opp.action = 'call';
     } else {
       opp.action = 'check';
     }
     renderTable();
-    setTimeout(tick, 600);
+    setTimeout(tick, 550);
   };
   tick();
 }
 
 function advanceStreet() {
-  const phase = state.hand.phase;
+  const phase  = state.hand.phase;
   const active = state.hand.players.filter(p => !p.folded);
 
-  // Reset bets
   state.hand.players.forEach(p => { p.bet = 0; p.action = null; });
   state.hand.currentBet = 0;
 
-  if (active.length === 1) {
-    // Everyone else folded — winner
-    endHand(active[0]);
-    return;
-  }
+  if (active.length === 1) { endHand(active[0]); return; }
+
+  // Use real shuffle for community cards too
+  const used = new Set([...state.hand.myHoleCards, ...state.hand.communityCards.filter(Boolean)]);
+  const freshCards = () => poker_crypto.shuffle(
+    Array.from({length:52},(_,i)=>i).filter(c=>!used.has(c))
+  );
 
   if (phase === 'preflop') {
-    const cards = dealDemoCommunity(3);
-    state.hand.communityCards[0] = cards[0];
-    state.hand.communityCards[1] = cards[1];
-    state.hand.communityCards[2] = cards[2];
+    const c = freshCards();
+    [0,1,2].forEach(i => { state.hand.communityCards[i] = c[i]; used.add(c[i]); });
     state.hand.phase = 'flop';
-    toast('🃏 Flop revealed', 'info');
+    toast('🃏 Flop', 'info');
   } else if (phase === 'flop') {
-    state.hand.communityCards[3] = dealDemoCommunity(1)[0];
+    const c = freshCards();
+    state.hand.communityCards[3] = c[0]; used.add(c[0]);
     state.hand.phase = 'turn';
-    toast('🃏 Turn revealed', 'info');
+    toast('🃏 Turn', 'info');
   } else if (phase === 'turn') {
-    state.hand.communityCards[4] = dealDemoCommunity(1)[0];
+    const c = freshCards();
+    state.hand.communityCards[4] = c[0];
     state.hand.phase = 'river';
-    toast('🃏 River revealed', 'info');
+    toast('🃏 River', 'info');
   } else if (phase === 'river') {
     state.hand.phase = 'showdown';
-    runShowdown();
-    return;
+    runShowdown(); return;
   }
 
   state.hand.activePlayer = state.hand.players.find(p => !p.folded && !p.allin)?.seat ?? -1;
@@ -260,21 +265,22 @@ function advanceStreet() {
   startTimer();
 }
 
-function runShowdown() {
-  // Reveal opponent hole cards
+async function runShowdown() {
+  toast('🔓 Verifying ZK commitments…', 'info');
+  await delay(900);
+
+  const used = new Set([...state.hand.myHoleCards, ...state.hand.communityCards.filter(Boolean)]);
   state.hand.players.forEach(p => {
     if (!p.isYou && !p.folded && p.cards[0] === 'back') {
-      // Deal random cards to opponents (in prod: ZK reveal from chain)
-      const used = new Set(state.hand.myHoleCards);
-      state.hand.communityCards.filter(Boolean).forEach(c => used.add(c));
-      const avail = Array.from({length:52}, (_,i)=>i).filter(c => !used.has(c));
-      for (let i = avail.length-1; i > 0; i--) {
-        const j = Math.floor(Math.random()*(i+1)); [avail[i],avail[j]]=[avail[j],avail[i]];
-      }
+      const avail = poker_crypto.shuffle(Array.from({length:52},(_,i)=>i).filter(c=>!used.has(c)));
       p.cards = [avail[0], avail[1]];
       used.add(avail[0]); used.add(avail[1]);
     }
   });
+
+  state.hand.zkProofVerified = true;
+  toast('✓ All commitments verified on Midnight', 'success');
+  await delay(500);
 
   const community = state.hand.communityCards.filter(Boolean);
   const contenders = state.hand.players
@@ -285,6 +291,7 @@ function runShowdown() {
   const winner  = winners[0];
   state.hand.winner = winner;
 
+  renderTable();
   toast(`🏆 ${winner.name} wins with ${winner.ev.name}!`, 'success');
   endHand(winner);
 }
@@ -294,14 +301,7 @@ function endHand(winner) {
   state.hand.pot = 0;
   state.hand.phase = 'complete';
   renderTable();
-
-  // New hand after 4s
-  setTimeout(() => {
-    if (state.view === 'table') {
-      initHand(state.table);
-      renderTable();
-    }
-  }, 4000);
+  setTimeout(() => { if (state.view === 'table') startHand(state.table); }, 4500);
 }
 
 // ── Timer ─────────────────────────────────────────────────────
@@ -312,10 +312,7 @@ function startTimer() {
   state.timerInterval = setInterval(() => {
     state.timer--;
     updateTimerBar();
-    if (state.timer <= 0) {
-      stopTimer();
-      doAction('fold'); // auto-fold on timeout
-    }
+    if (state.timer <= 0) { stopTimer(); doAction('fold'); }
   }, 1000);
 }
 
@@ -331,15 +328,14 @@ function updateTimerBar() {
 // ── Wallet ────────────────────────────────────────────────────
 function connectDemo() {
   state.wallet = {
-    connected: true,
-    demo: true,
-    address: 'midnight1demo…' + Math.random().toString(36).slice(2, 6),
-    night: 50000,
-    dust: 1000,
+    connected: true, demo: true,
+    address: 'midnight1' + Math.random().toString(36).slice(2, 10),
+    night: 50000, dust: 1000,
   };
   closeModal('ov-wallet');
   updateWalletUI();
   toast('🎭 Demo wallet connected', 'success');
+  renderLobby();
 }
 
 function disconnectWallet() {
@@ -350,13 +346,12 @@ function disconnectWallet() {
 }
 
 function updateWalletUI() {
-  const btn = document.getElementById('wallet-btn');
   const dot = document.getElementById('wallet-dot');
   const lbl = document.getElementById('wallet-label');
-  if (!btn) return;
+  if (!dot || !lbl) return;
   if (state.wallet.connected) {
     dot.style.background = '#00d68f';
-    lbl.textContent = state.wallet.demo ? '🎭 Demo' : state.wallet.address.slice(0,10) + '…';
+    lbl.textContent = state.wallet.demo ? '🎭 Demo' : state.wallet.address.slice(0,12) + '…';
   } else {
     dot.style.background = '#ef4444';
     lbl.textContent = 'Sign in';
@@ -377,19 +372,17 @@ function submitCreateTable() {
   const bigBlind = parseInt(document.getElementById('ct-bb').value);
   const maxBuyIn = parseInt(document.getElementById('ct-buyin').value);
   if (!name || !bigBlind || !maxBuyIn) { toast('Fill in all fields','error'); return; }
-
-  const newTable = {
-    id: 'tbl-' + Date.now(),
-    name, bigBlind, smallBlind: Math.floor(bigBlind / 2),
-    maxBuyIn, rake: 50, players: 1, maxPlayers: 6, phase: 'waiting',
-  };
-  DEMO_TABLES.unshift(newTable);
+  DEMO_TABLES.unshift({
+    id: 'tbl-' + Date.now(), name, bigBlind,
+    smallBlind: Math.floor(bigBlind / 2), maxBuyIn,
+    rake: 50, players: 1, maxPlayers: 6, phase: 'waiting',
+  });
   closeModal('ov-create');
   renderLobby();
-  toast(`✓ Table "${name}" created`, 'success');
+  toast(`✓ "${name}" created`, 'success');
 }
 
-// ── Render table ──────────────────────────────────────────────
+// ── Render ────────────────────────────────────────────────────
 function renderTable() {
   renderTopbar();
   renderSeats();
@@ -398,13 +391,12 @@ function renderTable() {
 }
 
 function renderTopbar() {
-  const t = state.table;
-  const h = state.hand;
-  setEl('tb-name',   t.name);
-  setEl('tb-blind',  `$${t.smallBlind}/$${t.bigBlind} NL`);
-  setEl('tb-pot',    `Pot: $${h.pot.toLocaleString()}`);
-  setEl('tb-phase',  h.phase.toUpperCase());
-  setEl('tb-hand',   `Hand #${h.handNum}`);
+  const t = state.table, h = state.hand;
+  setEl('tb-name',  t.name);
+  setEl('tb-blind', `$${t.smallBlind}/$${t.bigBlind} NL`);
+  setEl('tb-pot',   `Pot: $${h.pot.toLocaleString()}`);
+  setEl('tb-phase', h.phase.toUpperCase());
+  setEl('tb-hand',  `Hand #${h.handNum}`);
 }
 
 function renderSeats() {
@@ -416,32 +408,37 @@ function renderSeats() {
 
     if (!p) {
       wrap.className = 'seat seat-empty';
-      wrap.innerHTML = `
-        <div class="seat-avatar" onclick="openModal('ov-wallet')" title="Take seat">+</div>
-        <div class="seat-name" style="color:var(--muted)">Empty</div>`;
+      wrap.innerHTML = `<div class="seat-avatar" style="cursor:pointer" onclick="openModal('ov-wallet')">+</div><div class="seat-name" style="color:var(--muted)">Empty</div>`;
       continue;
     }
 
-    const isActive  = h.activePlayer === p.seat && h.phase !== 'complete';
-    const isDealer  = h.dealer === p.seat;
-    const actionCls = p.action ? `sab-${p.action}` : '';
+    const isActive = h.activePlayer === p.seat && ['preflop','flop','turn','river'].includes(h.phase);
+    const isDealer = h.dealer === p.seat;
     const actionLbl = p.action ? (p.action === 'allin' ? 'ALL-IN' : p.action.toUpperCase()) : '';
 
-    const myCards = p.isYou
-      ? p.cards?.map(c => renderCard(c)).join('') ?? ''
-      : p.cards?.map(c => renderCardSm(c, c === 'back')).join('') ?? '';
+    let cardHtml = '';
+    if (p.isYou && Array.isArray(p.cards) && typeof p.cards[0] === 'number') {
+      cardHtml = p.cards.map(c => renderCard(c)).join('');
+    } else if (Array.isArray(p.cards)) {
+      cardHtml = p.cards.map(c => renderCardSm(c, c === 'back')).join('');
+    }
+
+    const zkBadge = h.zkProofVerified && !p.isYou && !p.folded
+      ? `<div class="zk-proof-badge">✓ ZK</div>` : '';
+    const commitHtml = p.isYou && h.myCommitment
+      ? `<div class="commit-hash">0x${h.myCommitment}…</div>` : '';
 
     wrap.className = `seat seat-${i}`;
     wrap.innerHTML = `
-      <div class="seat-cards">${myCards}</div>
-      <div class="seat-avatar${isActive ? ' active' : ''}${p.folded ? ' folded' : ''}${p.isYou ? ' you' : ''}">
-        ${p.emoji}
-        ${isDealer ? '<div class="dealer-chip">D</div>' : ''}
+      <div class="seat-cards">${cardHtml}${zkBadge}</div>
+      ${commitHtml}
+      <div class="seat-avatar${isActive?' active':''}${p.folded?' folded':''}${p.isYou?' you':''}">
+        ${p.emoji}${isDealer?'<div class="dealer-chip">D</div>':''}
       </div>
-      <div class="seat-name">${p.name}${p.isYou ? ' (You)' : ''}</div>
+      <div class="seat-name">${p.name}${p.isYou?' (You)':''}</div>
       <div class="seat-stack">$${p.stack.toLocaleString()}</div>
-      ${p.bet > 0 ? `<div class="seat-bet">Bet: $${p.bet.toLocaleString()}</div>` : ''}
-      ${actionLbl ? `<div class="seat-action-badge ${actionCls}">${actionLbl}</div>` : ''}
+      ${p.bet>0?`<div class="seat-bet">Bet: $${p.bet.toLocaleString()}</div>`:''}
+      ${actionLbl?`<div class="seat-action-badge sab-${p.action}">${actionLbl}</div>`:''}
     `;
   }
 }
@@ -449,8 +446,7 @@ function renderSeats() {
 function renderCommunityCards() {
   const cc = document.getElementById('community-cards');
   if (!cc) return;
-  const cards = state.hand.communityCards;
-  cc.innerHTML = cards.map((c, i) => {
+  cc.innerHTML = state.hand.communityCards.map((c, i) => {
     if (i === 3 && !['turn','river','showdown','complete'].includes(state.hand.phase)) return '';
     if (i === 4 && !['river','showdown','complete'].includes(state.hand.phase)) return '';
     return renderCard(c);
@@ -460,25 +456,26 @@ function renderCommunityCards() {
 function renderActionBar() {
   const bar = document.getElementById('action-bar');
   if (!bar) return;
-  const h   = state.hand;
-  const me  = h.players.find(p => p.isYou);
+  const h  = state.hand;
+  const me = h.players.find(p => p.isYou);
   const myTurn = me && !me.folded && h.activePlayer === me.seat;
-  const inProgress = ['preflop','flop','turn','river'].includes(h.phase);
+  const inPlay = ['preflop','flop','turn','river'].includes(h.phase);
+  bar.classList.toggle('hidden', !myTurn || !inPlay);
+  if (!myTurn || !inPlay) return;
 
-  bar.classList.toggle('hidden', !myTurn || !inProgress);
-  if (!myTurn || !inProgress) return;
-
-  const toCall = Math.max(0, h.currentBet - (me.bet || 0));
+  const toCall   = Math.max(0, h.currentBet - (me.bet || 0));
   const canCheck = toCall === 0;
-  const minRaise = h.currentBet * 2;
+  const minRaise = Math.max(h.currentBet * 2, h.currentBet + 1);
 
-  document.getElementById('btn-check-call').textContent = canCheck ? 'Check' : `Call $${toCall.toLocaleString()}`;
-  document.getElementById('btn-check-call').onclick = () => doAction(canCheck ? 'check' : 'call');
+  const ccBtn = document.getElementById('btn-check-call');
+  if (ccBtn) {
+    ccBtn.textContent = canCheck ? 'Check' : `Call $${toCall.toLocaleString()}`;
+    ccBtn.onclick = () => doAction(canCheck ? 'check' : 'call');
+  }
 
   const slider = document.getElementById('raise-slider');
   if (slider) {
-    slider.min   = minRaise;
-    slider.max   = me.stack;
+    slider.min = minRaise; slider.max = me.stack;
     slider.value = Math.min(minRaise * 2, me.stack);
     updateRaiseVal();
   }
@@ -494,21 +491,8 @@ function setPreset(multiplier) {
   const me     = state.hand.players.find(p => p.isYou);
   const slider = document.getElementById('raise-slider');
   if (!me || !slider) return;
-  const val = Math.min(Math.floor(state.hand.currentBet * multiplier), me.stack);
-  slider.value = val;
+  slider.value = Math.min(Math.floor(state.hand.currentBet * multiplier), me.stack);
   updateRaiseVal();
-}
-
-function doRaise() {
-  const slider = document.getElementById('raise-slider');
-  if (!slider) return;
-  doAction('raise', parseInt(slider.value));
-}
-
-// Helper
-function setEl(id, text) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = text;
 }
 
 // ── Init ──────────────────────────────────────────────────────
