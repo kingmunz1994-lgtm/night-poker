@@ -23,6 +23,7 @@ DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
 
 let state = {
   view: 'lobby',
+  quickDeal: false,
   wallet: { connected: false, address: null, demo: false, night: 0, dust: 0 },
   table: null,
   hand: {
@@ -59,6 +60,12 @@ function showView(name) {
   const el = document.getElementById('page-' + name);
   if (el) el.classList.add('active');
   state.view = name;
+  if (name === 'lobby') { state.quickDeal = false; updateQdBadge(); }
+}
+
+function updateQdBadge() {
+  const badge = document.getElementById('qd-badge');
+  if (badge) badge.style.display = state.quickDeal ? 'flex' : 'none';
 }
 
 // ── Toast ─────────────────────────────────────────────────────
@@ -92,15 +99,30 @@ function renderLobby() {
   `).join('');
 }
 
+// ── Quick Deal ────────────────────────────────────────────────
+function joinQuickDeal() {
+  if (!state.wallet.connected) {
+    state.wallet = { connected: true, demo: true, address: 'midnight1demo', night: 50000, dust: 1000 };
+    updateWalletUI();
+    toast('🎭 Demo wallet connected', 'success');
+  }
+  state.quickDeal = true;
+  state.table = DEMO_TABLES[0];
+  DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
+  showView('table');
+  updateQdBadge();
+  startHand(state.table);
+}
+
 // ── Join table ────────────────────────────────────────────────
 function joinTable(id) {
   if (!state.wallet.connected) { openModal('ov-wallet'); return; }
   const tbl = DEMO_TABLES.find(t => t.id === id);
   if (!tbl) return;
   state.table = tbl;
-  // Fresh stacks when joining a new table
   DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
   showView('table');
+  updateScoreStrip();
   startHand(tbl);
 }
 
@@ -195,10 +217,15 @@ async function startHand(tbl) {
   state.hand.myHoleCards = myCards;
   state.hand.players.find(p => p.isYou).cards = myCards;
   state.hand.phase = 'preflop';
-  state.hand.activePlayer = 3;
+  state.hand.activePlayer = state.quickDeal ? -1 : 3;
 
   renderTable();
-  startTimer();
+  if (state.quickDeal) {
+    toast('⚡ Quick Deal — watch the ZK magic unfold…', 'info');
+    setTimeout(() => advanceStreet(), 2400);
+  } else {
+    startTimer();
+  }
 }
 
 // ── Player actions ────────────────────────────────────────────
@@ -326,6 +353,13 @@ function advanceStreet() {
     return;
   }
 
+  if (state.quickDeal) {
+    state.hand.activePlayer = -1;
+    renderTable();
+    setTimeout(() => advanceStreet(), 1800);
+    return;
+  }
+
   const me = state.hand.players.find(p => p.isYou);
   if (me && !me.folded && !me.allin) {
     state.hand.activePlayer = me.seat;
@@ -395,6 +429,11 @@ function endHand(walkoverWinner) {
     state.hand.pot = 0;
     toast(`🏆 ${walkoverWinner.name} wins!`, 'success');
   }
+
+  // Award Night Score
+  const me = state.hand.players.find(p => p.isYou);
+  const youWon = walkoverWinner?.isYou || state.hand.winner?.isYou;
+  if (me) awardHandScore(youWon);
 
   // Persist stacks for next hand
   state.hand.players.forEach(p => { playerStacks[p.seat] = p.stack; });
@@ -609,8 +648,42 @@ function setPreset(multiplier) {
   updateRaiseVal();
 }
 
+// ── Night Score ───────────────────────────────────────────────
+function loadNightScore() {
+  try { return JSON.parse(localStorage.getItem('night_score') || '{"score":0,"hands":0,"zk":0,"tokens":0}'); }
+  catch { return { score: 0, hands: 0, zk: 0, tokens: 0 }; }
+}
+
+function saveNightScore(ns) {
+  localStorage.setItem('night_score', JSON.stringify(ns));
+}
+
+function awardHandScore(won) {
+  const ns = loadNightScore();
+  ns.hands  = (ns.hands  || 0) + 1;
+  ns.score  = (ns.score  || 0) + (won ? 15 : 5);
+  ns.zk     = (ns.zk     || 0) + 1;
+  saveNightScore(ns);
+  updateScoreStrip();
+}
+
+function updateScoreStrip() {
+  const ns  = loadNightScore();
+  const bar = document.getElementById('ns-bar');
+  const val = document.getElementById('ns-val');
+  const hnd = document.getElementById('ns-hands');
+  const str = document.getElementById('ns-strip');
+  if (!bar) return;
+  if (str) str.style.display = state.view === 'table' && state.wallet.connected ? 'flex' : 'none';
+  const pct = Math.min((ns.score / 2000) * 100, 100);
+  bar.style.width = pct + '%';
+  if (val) val.textContent = ns.score;
+  if (hnd) hnd.textContent = ns.hands + ' hands';
+}
+
 // ── Init ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   renderLobby();
   updateWalletUI();
+  updateScoreStrip();
 });
