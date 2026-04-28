@@ -77,6 +77,18 @@
       </div>
     </div>
 
+    <!-- Quick Deal banner -->
+    <div class="quick-deal-banner">
+      <div style="font-size:36px;margin-bottom:12px;">⚡</div>
+      <div style="font-size:19px;font-weight:800;margin-bottom:8px;">Never played poker?</div>
+      <div style="font-size:13px;color:var(--text2);line-height:1.7;max-width:420px;margin:0 auto 20px;">
+        Quick Deal skips all the rules. Cards are dealt, ZK proofs kick in, best hand wins automatically.
+        A full hand in about 20 seconds — just watch the math work.
+      </div>
+      <button class="btn btn-primary btn-lg" onclick="joinQuickDeal()">⚡ Try Quick Deal — No Rules Needed →</button>
+      <div style="margin-top:10px;font-size:11px;color:var(--muted);">No wallet required · Demo chips · ZK magic included</div>
+    </div>
+
     <!-- Table grid -->
     <div class="tables-hdr">
       <h2>Open Tables</h2>
@@ -122,7 +134,8 @@
 
     <!-- Top bar -->
     <div class="table-topbar">
-      <button class="btn btn-ghost btn-sm" onclick="showView('lobby'); stopTimer();">← Lobby</button>
+      <button class="btn btn-ghost btn-sm" onclick="state.quickDeal=false; showView('lobby'); stopTimer();">← Lobby</button>
+      <div id="qd-badge" style="display:none;align-items:center;gap:6px;font-size:11px;font-weight:700;font-family:var(--mono);color:var(--cyan);background:rgba(6,182,212,.1);border:1px solid rgba(6,182,212,.2);border-radius:20px;padding:4px 10px;">⚡ Quick Deal</div>
       <div class="table-topbar-name" id="tb-name"></div>
       <div class="table-topbar-blind" id="tb-blind"></div>
       <div class="table-topbar-pot" id="tb-pot"></div>
@@ -137,6 +150,16 @@
     <!-- Timer bar -->
     <div class="timer-wrap">
       <div class="timer-bar" id="timer-bar" style="width:100%"></div>
+    </div>
+
+    <!-- Night Score strip -->
+    <div id="ns-strip" style="display:none;background:rgba(124,58,237,.07);border-bottom:1px solid rgba(124,58,237,.15);padding:6px 20px;display:flex;align-items:center;gap:12px;font-size:11px;font-family:var(--mono);">
+      <span style="color:var(--glow);font-weight:700;">⭐ Night Score</span>
+      <div style="flex:1;height:3px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;">
+        <div id="ns-bar" style="height:100%;background:linear-gradient(90deg,var(--ink),var(--glow));border-radius:2px;width:0%;transition:width .5s;"></div>
+      </div>
+      <span id="ns-val" style="color:var(--glow);font-weight:700;min-width:40px;text-align:right;">0</span>
+      <span id="ns-hands" style="color:var(--muted);">0 hands</span>
     </div>
 
     <!-- Felt table -->
@@ -275,6 +298,7 @@
 </div>
 
 <!-- ══ SCRIPTS ════════════════════════════════════════════════ -->
+<script src="js/wallet.js"></script>
 <script src="js/cards.js"></script>
 <script src="js/crypto.js"></script>
 <script src="js/game.js"></script>
@@ -297,5 +321,6 @@ setInterval(() => {
   if (ph && state.view === 'table') ph.textContent = state.hand.phase.toUpperCase();
 }, 200);
 </script>
+<div id="eco-nav" style="background:rgba(5,3,8,.95);border-top:1px solid rgba(255,255,255,.07);padding:12px 24px;text-align:center;font-size:11px;font-family:monospace;"><span style="color:#4b5563;font-weight:700;margin-right:6px;">Night Ecosystem:</span><a href="https://kingmunz1994-lgtm.github.io/night-hub/" target="_blank" style="color:#a78bfa;text-decoration:none;margin:0 5px;padding:3px 8px;border:1px solid rgba(124,58,237,.25);border-radius:10px;">Hub</a><a href="https://kingmunz1994-lgtm.github.io/night-poker/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Poker</a><a href="https://kingmunz1994-lgtm.github.io/night-fun/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Fun</a><a href="https://kingmunz1994-lgtm.github.io/night-markets/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Markets</a><a href="https://kingmunz1994-lgtm.github.io/night-id/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">ID</a><a href="https://kingmunz1994-lgtm.github.io/night-save/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Save</a><a href="https://kingmunz1994-lgtm.github.io/night-lend/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Lend</a><a href="https://kingmunz1994-lgtm.github.io/night-work/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Work</a><a href="https://kingmunz1994-lgtm.github.io/night-biz/" target="_blank" style="color:#9ca3af;text-decoration:none;margin:0 5px;">Biz</a></div>
 </body>
 </html>
