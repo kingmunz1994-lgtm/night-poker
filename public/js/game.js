@@ -123,6 +123,7 @@ function joinTable(id) {
   DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
   showView('table');
   updateScoreStrip();
+  connectPokerWS(tbl.id);
   startHand(tbl);
 }
 
@@ -253,8 +254,15 @@ function doAction(action) {
     toast('All-in! 🔥', 'success');
   }
 
+  broadcastAction(action, me.bet);
   renderTable();
-  setTimeout(() => runOpponentActions(), 800);
+  if (hasRealOpponents()) {
+    // Wait for real players to act; their actions come in via WS
+    state.hand.activePlayer = nextActivePlayer(me.seat);
+    renderTable();
+  } else {
+    setTimeout(() => runOpponentActions(), 800);
+  }
 }
 
 function doRaise() {
@@ -270,8 +278,14 @@ function doRaise() {
   if (me.stack === 0) { me.allin = true; me.action = 'allin'; }
   else                { me.action = 'raise'; }
   toast(`You raised to $${amt.toLocaleString()}`, 'success');
+  broadcastAction('raise', amt);
   renderTable();
-  setTimeout(() => runOpponentActions(), 800);
+  if (hasRealOpponents()) {
+    state.hand.activePlayer = nextActivePlayer(me.seat);
+    renderTable();
+  } else {
+    setTimeout(() => runOpponentActions(), 800);
+  }
 }
 
 // ── Opponent AI ───────────────────────────────────────────────
@@ -479,6 +493,7 @@ function connectDemo() {
 
 function disconnectWallet() {
   state.wallet = { connected: false, address: null, demo: false, night: 0, dust: 0 };
+  disconnectPokerWS();
   updateWalletUI();
   showView('lobby');
   stopTimer();
@@ -679,6 +694,106 @@ function updateScoreStrip() {
   bar.style.width = pct + '%';
   if (val) val.textContent = ns.score;
   if (hnd) hnd.textContent = ns.hands + ' hands';
+}
+
+// ── WebSocket Multiplayer ─────────────────────────────────────
+const POKER_WS_URL = 'ws://127.0.0.1:3001/ws/poker/';
+let _pokerWS = null;
+let _mySeat  = null;
+let _realPlayers = {}; // seat → true if a real player is at that seat
+
+function connectPokerWS(tableId) {
+  if (_pokerWS && _pokerWS.readyState < 2) _pokerWS.close();
+  try {
+    _pokerWS = new WebSocket(POKER_WS_URL + tableId);
+    _pokerWS.onopen = () => {
+      _pokerWS.send(JSON.stringify({ type:'join', address: state.wallet.address, tableId }));
+      toast('🌐 Connected to live room', 'info');
+    };
+    _pokerWS.onmessage = (ev) => {
+      try { handlePokerWS(JSON.parse(ev.data)); } catch {}
+    };
+    _pokerWS.onclose = () => {
+      _realPlayers = {};
+      if (state.view === 'table') toast('🔌 Disconnected from room', 'info');
+    };
+    _pokerWS.onerror = () => { /* silent — falls back to solo AI */ };
+  } catch { _pokerWS = null; }
+}
+
+function disconnectPokerWS() {
+  if (_pokerWS) { _pokerWS.close(); _pokerWS = null; }
+  _realPlayers = {};
+}
+
+function handlePokerWS(msg) {
+  if (msg.type === 'room_state') {
+    _mySeat = msg.seat;
+    if (msg.playerCount > 1) toast(`${msg.playerCount} players at this table`, 'info');
+  }
+  if (msg.type === 'player_joined') {
+    _realPlayers[msg.seat] = true;
+    if (msg.seat !== _mySeat) toast(`Player joined seat ${msg.seat}`, 'info');
+    renderLobbyPlayerCount(msg.playerCount);
+  }
+  if (msg.type === 'player_left') {
+    delete _realPlayers[msg.seat];
+    toast(`A player left the table`, 'info');
+    renderLobbyPlayerCount(msg.playerCount);
+  }
+  if (msg.type === 'action' && msg.seat !== _mySeat) {
+    // A real opponent acted — apply it instead of AI
+    const p = state.hand.players.find(pl => pl.seat === msg.seat);
+    if (p && state.hand.activePlayer === msg.seat) {
+      applyRealAction(p, msg.action, msg.amount);
+    }
+  }
+  if (msg.type === 'chat') {
+    toast(`Seat ${msg.seat}: ${msg.text}`, 'info');
+  }
+}
+
+function applyRealAction(p, action, amount) {
+  const h = state.hand;
+  if (action === 'fold')  { p.folded = true; p.action = 'fold'; }
+  else if (action === 'check') { p.action = 'check'; }
+  else if (action === 'call')  { const toCall = Math.max(0, h.currentBet - p.bet); p.stack -= toCall; p.bet += toCall; h.pot += toCall; p.action = 'call'; }
+  else if (action === 'raise' && amount) { const extra = amount - p.bet; p.stack -= extra; h.pot += extra; h.currentBet = amount; p.bet = amount; p.action = 'raise'; }
+  h.activePlayer = nextActivePlayer(h.activePlayer);
+  renderTable();
+  checkStreetOver();
+}
+
+function nextActivePlayer(fromSeat) {
+  const h = state.hand;
+  for (let i = 1; i <= 5; i++) {
+    const seat = (fromSeat + i) % 6;
+    const p = h.players.find(pl => pl.seat === seat);
+    if (p && !p.folded && !p.allin) return seat;
+  }
+  return null;
+}
+
+function broadcastAction(action, amount) {
+  if (_pokerWS && _pokerWS.readyState === 1) {
+    _pokerWS.send(JSON.stringify({ type:'action', seat: _mySeat, action, amount }));
+  }
+}
+
+function hasRealOpponents() {
+  return Object.keys(_realPlayers).filter(s => Number(s) !== _mySeat).length > 0;
+}
+
+function renderLobbyPlayerCount(count) {
+  const el = document.getElementById('live-player-count');
+  if (el) el.textContent = count + ' online';
+}
+
+function sendChat(text) {
+  if (!text?.trim()) return;
+  if (_pokerWS && _pokerWS.readyState === 1) {
+    _pokerWS.send(JSON.stringify({ type:'chat', seat: _mySeat, text }));
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────
