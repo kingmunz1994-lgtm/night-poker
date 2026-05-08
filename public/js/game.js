@@ -1,5 +1,18 @@
 // ── Night Poker — Game State & Logic ─────────────────────────
 
+const NIGHT_ID_API = 'https://night-markets-94-production.up.railway.app';
+async function recordAction(points) {
+  const addr = typeof walletState !== 'undefined' ? walletState?.address : null;
+  if (!addr) return;
+  try {
+    await fetch(`${NIGHT_ID_API}/api/nightid/record-action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ holderAddress: addr, appId: 'night-poker', points }),
+    });
+  } catch (_) {}
+}
+
 const REBUY_AMOUNT = 5000;
 
 const DEMO_TABLES = [
@@ -431,6 +444,7 @@ async function runShowdown() {
   winners.forEach(w => {
     const p = state.hand.players.find(pl => pl.seat === w.seat);
     if (p) p.stack += share;
+    if (p?.isYou) recordAction(15);
   });
   state.hand.pot = 0;
 
