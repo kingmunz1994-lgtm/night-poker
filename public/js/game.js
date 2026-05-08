@@ -1,6 +1,12 @@
 // ── Night Poker — Game State & Logic ─────────────────────────
 
-const NIGHT_ID_API = 'https://night-markets-94-production.up.railway.app';
+const _isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+const NIGHT_ID_API = _isLocal
+  ? 'http://127.0.0.1:3001'
+  : 'https://night-markets-94-production.up.railway.app';
+const POKER_WS_BASE = _isLocal
+  ? 'ws://127.0.0.1:3001/ws/poker/'
+  : 'wss://night-markets-94-production.up.railway.app/ws/poker/';
 async function recordAction(points) {
   const addr = typeof walletState !== 'undefined' ? walletState?.address : null;
   if (!addr) return;
@@ -16,11 +22,26 @@ async function recordAction(points) {
 const REBUY_AMOUNT = 5000;
 
 const DEMO_TABLES = [
-  { id: 'tbl-1', name: 'Midnight Lounge',  bigBlind: 100,  smallBlind: 50,   maxBuyIn: 10000,  rake: 50, players: 3, maxPlayers: 6, phase: 'waiting' },
-  { id: 'tbl-2', name: 'High Roller Room', bigBlind: 1000, smallBlind: 500,  maxBuyIn: 100000, rake: 25, players: 5, maxPlayers: 6, phase: 'playing' },
-  { id: 'tbl-3', name: 'ZK Private Table', bigBlind: 500,  smallBlind: 250,  maxBuyIn: 50000,  rake: 50, players: 1, maxPlayers: 6, phase: 'waiting' },
-  { id: 'tbl-4', name: 'Micro Stakes',     bigBlind: 10,   smallBlind: 5,    maxBuyIn: 1000,   rake: 50, players: 2, maxPlayers: 6, phase: 'playing' },
+  { id: 'midnight-lounge',  name: 'Midnight Lounge',  bigBlind: 100,  smallBlind: 50,  maxBuyIn: 10000,  maxPlayers: 6, players: 0, phase: 'waiting' },
+  { id: 'high-roller-room', name: 'High Roller Room', bigBlind: 1000, smallBlind: 500, maxBuyIn: 100000, maxPlayers: 6, players: 0, phase: 'waiting' },
+  { id: 'zk-private-table', name: 'ZK Private Table', bigBlind: 500,  smallBlind: 250, maxBuyIn: 50000,  maxPlayers: 6, players: 0, phase: 'waiting' },
+  { id: 'micro-stakes',     name: 'Micro Stakes',     bigBlind: 10,   smallBlind: 5,   maxBuyIn: 1000,   maxPlayers: 6, players: 0, phase: 'waiting' },
 ];
+
+var _liveTables = null; // null = not yet loaded, [] = API down (use DEMO_TABLES)
+
+async function loadLiveTables() {
+  try {
+    const r = await fetch(NIGHT_ID_API + '/api/poker/tables', { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.tables) { _liveTables = d.tables; renderLobby(); }
+  } catch { _liveTables = []; }
+}
+
+function getTables() {
+  return (_liveTables && _liveTables.length) ? _liveTables : DEMO_TABLES;
+}
 
 const DEMO_PLAYERS = [
   { name: 'NightOwl',  emoji: '🦉', stack: 4200, seat: 0 },
@@ -95,7 +116,7 @@ function toast(msg, type = 'info') {
 function renderLobby() {
   const grid = document.getElementById('tables-grid');
   if (!grid) return;
-  grid.innerHTML = DEMO_TABLES.map(t => `
+  grid.innerHTML = getTables().map(t => `
     <div class="table-card" onclick="joinTable('${t.id}')">
       <div class="tc-name">${t.name}</div>
       <div class="tc-blind">$${t.smallBlind}/$${t.bigBlind} · Max $${t.maxBuyIn.toLocaleString()}</div>
@@ -130,7 +151,7 @@ function joinQuickDeal() {
 // ── Join table ────────────────────────────────────────────────
 function joinTable(id) {
   if (!state.wallet.connected) { openModal('ov-wallet'); return; }
-  const tbl = DEMO_TABLES.find(t => t.id === id);
+  const tbl = getTables().find(t => t.id === id);
   if (!tbl) return;
   state.table = tbl;
   DEMO_PLAYERS.forEach(p => { playerStacks[p.seat] = p.stack; });
@@ -536,15 +557,34 @@ function openCreateTable() {
   openModal('ov-create');
 }
 
-function submitCreateTable() {
+async function submitCreateTable() {
   const name     = document.getElementById('ct-name').value.trim();
   const bigBlind = parseInt(document.getElementById('ct-bb').value);
   const maxBuyIn = parseInt(document.getElementById('ct-buyin').value);
   if (!name || !bigBlind || !maxBuyIn) { toast('Fill in all fields', 'error'); return; }
+
+  try {
+    const r = await fetch(NIGHT_ID_API + '/api/poker/tables', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, bigBlind, maxBuyIn }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      if (_liveTables) _liveTables.unshift(d.table);
+      closeModal('ov-create');
+      renderLobby();
+      toast(`✓ "${name}" created`, 'success');
+      return;
+    }
+  } catch {}
+
+  // Fallback: add locally
   DEMO_TABLES.unshift({
     id: 'tbl-' + Date.now(), name, bigBlind,
     smallBlind: Math.floor(bigBlind / 2), maxBuyIn,
-    rake: 50, players: 1, maxPlayers: 6, phase: 'waiting',
+    maxPlayers: 6, players: 0, phase: 'waiting',
   });
   closeModal('ov-create');
   renderLobby();
@@ -711,7 +751,6 @@ function updateScoreStrip() {
 }
 
 // ── WebSocket Multiplayer ─────────────────────────────────────
-const POKER_WS_URL = 'ws://127.0.0.1:3001/ws/poker/';
 let _pokerWS = null;
 let _mySeat  = null;
 let _realPlayers = {}; // seat → true if a real player is at that seat
@@ -719,7 +758,7 @@ let _realPlayers = {}; // seat → true if a real player is at that seat
 function connectPokerWS(tableId) {
   if (_pokerWS && _pokerWS.readyState < 2) _pokerWS.close();
   try {
-    _pokerWS = new WebSocket(POKER_WS_URL + tableId);
+    _pokerWS = new WebSocket(POKER_WS_BASE + tableId);
     _pokerWS.onopen = () => {
       _pokerWS.send(JSON.stringify({ type:'join', address: state.wallet.address, tableId }));
       toast('🌐 Connected to live room', 'info');
@@ -815,4 +854,5 @@ document.addEventListener('DOMContentLoaded', () => {
   renderLobby();
   updateWalletUI();
   updateScoreStrip();
+  loadLiveTables();
 });
