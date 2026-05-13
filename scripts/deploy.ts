@@ -119,7 +119,7 @@ async function main() {
   const providers = {
     publicDataProvider:   indexerPublicDataProvider(CONFIG.indexer, CONFIG.indexerWS),
     proofProvider:        httpClientProofProvider(CONFIG.proofServer, new NodeZkConfigProvider(ZK_CONFIG_PATH)),
-    privateStateProvider: levelPrivateStateProvider({ privateStateStoreName: 'night-poker-deploy', walletProvider: ctx.wallet as any }),
+    privateStateProvider: levelPrivateStateProvider({ privateStateStoreName: 'night-poker-deploy', walletProvider: ctx.wallet as any, privateStoragePasswordProvider: () => 'night-poker-deploy-secret-2025' }),
     walletProvider:   ctx.wallet as any,
     midnightProvider: ctx.wallet as any,
   };
