@@ -88,6 +88,27 @@ function setEl(id, text) {
   if (el) el.textContent = text;
 }
 
+function flyChip(seatNum) {
+  const seatEl = document.getElementById(`seat-${seatNum}`);
+  const center = document.querySelector('.community-area');
+  if (!seatEl || !center) return;
+  const chip = document.createElement('div');
+  chip.textContent = '🔴';
+  chip.style.cssText = 'position:fixed;font-size:16px;pointer-events:none;z-index:9999;transition:all 0.5s cubic-bezier(.4,0,.2,1);';
+  document.body.appendChild(chip);
+  const sr = seatEl.getBoundingClientRect();
+  const cr = center.getBoundingClientRect();
+  chip.style.left = (sr.left + sr.width / 2 - 8) + 'px';
+  chip.style.top  = (sr.top  + sr.height / 2 - 8) + 'px';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    chip.style.left      = (cr.left + cr.width / 2 - 8) + 'px';
+    chip.style.top       = (cr.top  + cr.height / 2 - 8) + 'px';
+    chip.style.opacity   = '0';
+    chip.style.transform = 'scale(0.4)';
+  }));
+  setTimeout(() => chip.remove(), 600);
+}
+
 // ── Navigation ────────────────────────────────────────────────
 function showView(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -216,6 +237,8 @@ async function startHand(tbl) {
     if (bbPlayer.stack === 0) bbPlayer.allin = true;
   }
   state.hand.pot = (sbPlayer?.bet ?? 0) + (bbPlayer?.bet ?? 0);
+  if (sbPlayer?.bet > 0) { NightSounds.chip(); flyChip(sbSeat); }
+  if (bbPlayer?.bet > 0) { setTimeout(() => { NightSounds.chip(); flyChip(bbSeat); }, 180); }
 
   renderTable();
 
@@ -229,11 +252,13 @@ async function startHand(tbl) {
   const deck = Array.from({length: 52}, (_, i) => i);
   const shuffled = poker_crypto.shuffle(deck);
   toast('🔀 Shuffling with your ZK key…', 'info');
+  NightSounds.shuffle();
   await delay(600);
 
   // Step 3: XOR-encrypt deck
   const encDeck = poker_crypto.encryptDeck(shuffled);
   toast('🔐 Deck encrypted · committed to Midnight…', 'info');
+  NightSounds.deal();
   await delay(500);
 
   // Step 4: deal hole cards
@@ -272,20 +297,24 @@ function doAction(action) {
   if (action === 'fold') {
     me.folded = true; me.action = 'fold';
     toast('You folded', 'info');
+    NightSounds.fold();
   } else if (action === 'check') {
     me.action = 'check';
     toast('You checked', 'info');
+    NightSounds.check();
   } else if (action === 'call') {
     const toCall = Math.min(state.hand.currentBet - me.bet, me.stack);
     me.stack -= toCall; me.bet += toCall; state.hand.pot += toCall;
-    if (me.stack === 0) { me.allin = true; me.action = 'allin'; toast(`You called $${toCall.toLocaleString()} · All-in!`, 'info'); }
-    else                { me.action = 'call'; toast(`You called $${toCall.toLocaleString()}`, 'info'); }
+    if (me.stack === 0) { me.allin = true; me.action = 'allin'; toast(`You called $${toCall.toLocaleString()} · All-in!`, 'info'); NightSounds.allIn(); }
+    else                { me.action = 'call'; toast(`You called $${toCall.toLocaleString()}`, 'info'); NightSounds.call(); }
+    flyChip(me.seat);
   } else if (action === 'allin') {
     state.hand.pot += me.stack;
     me.bet += me.stack; me.stack = 0;
     if (me.bet > state.hand.currentBet) state.hand.currentBet = me.bet;
     me.allin = true; me.action = 'allin';
     toast('All-in! 🔥', 'success');
+    NightSounds.allIn(); flyChip(me.seat);
   }
 
   broadcastAction(action, me.bet);
@@ -312,6 +341,7 @@ function doRaise() {
   if (me.stack === 0) { me.allin = true; me.action = 'allin'; }
   else                { me.action = 'raise'; }
   toast(`You raised to $${amt.toLocaleString()}`, 'success');
+  NightSounds.raise(); flyChip(me.seat);
   broadcastAction('raise', amt);
   renderTable();
   if (hasRealOpponents()) {
@@ -385,16 +415,19 @@ function advanceStreet() {
     [0, 1, 2].forEach(i => { state.hand.communityCards[i] = c[i]; used.add(c[i]); });
     state.hand.phase = 'flop';
     toast('🃏 Flop', 'info');
+    NightSounds.newCard();
   } else if (phase === 'flop') {
     const c = freshCards();
     state.hand.communityCards[3] = c[0]; used.add(c[0]);
     state.hand.phase = 'turn';
     toast('🃏 Turn', 'info');
+    NightSounds.newCard();
   } else if (phase === 'turn') {
     const c = freshCards();
     state.hand.communityCards[4] = c[0];
     state.hand.phase = 'river';
     toast('🃏 River', 'info');
+    NightSounds.newCard();
   } else if (phase === 'river') {
     state.hand.phase = 'showdown';
     runShowdown();
@@ -451,12 +484,27 @@ async function runShowdown() {
 
   renderTable();
 
-  const potAmt = state.hand.pot;
+  const potAmt  = state.hand.pot;
+  const youWon  = winners.some(w => w.isYou);
+  const mePlayer = state.hand.players.find(p => p.isYou);
   if (winners.length > 1) {
     toast(`🤝 Split pot! ${winners.map(w => w.name).join(' & ')} chop $${potAmt.toLocaleString()} with ${winner.ev.name}`, 'success');
   } else {
     toast(`🏆 ${winner.name} wins $${potAmt.toLocaleString()} with ${winner.ev.name}!`, 'success');
   }
+  if (youWon) NightSounds.win();
+
+  NightHistory.addHand({
+    handNum:        state.hand.handNum,
+    holeCards:      state.hand.myHoleCards,
+    communityCards: state.hand.communityCards,
+    pot:            potAmt,
+    won:            youWon,
+    action:         mePlayer?.action || null,
+    handRank:       youWon ? winner.ev.name : (contenders.find(c => c.isYou)?.ev?.name || null),
+    myKey:          state.hand.myKey,
+    commitment:     state.hand.myCommitment,
+  });
 
   await delay(600);
 
@@ -475,8 +523,22 @@ async function runShowdown() {
 function endHand(walkoverWinner) {
   if (walkoverWinner) {
     walkoverWinner.stack += state.hand.pot;
+    const walkedPot = state.hand.pot;
     state.hand.pot = 0;
     toast(`🏆 ${walkoverWinner.name} wins!`, 'success');
+    if (walkoverWinner.isYou) NightSounds.win();
+    const me = state.hand.players.find(p => p.isYou);
+    NightHistory.addHand({
+      handNum:        state.hand.handNum,
+      holeCards:      state.hand.myHoleCards,
+      communityCards: state.hand.communityCards,
+      pot:            walkedPot,
+      won:            !!walkoverWinner.isYou,
+      action:         me?.action || 'fold',
+      handRank:       null,
+      myKey:          state.hand.myKey,
+      commitment:     state.hand.myCommitment,
+    });
   }
 
   // Award Night Score
@@ -497,9 +559,11 @@ function startTimer() {
   state.timer = 30;
   stopTimer();
   updateTimerBar();
+  NightSounds.yourTurn();
   state.timerInterval = setInterval(() => {
     state.timer--;
     updateTimerBar();
+    if (state.timer > 0 && state.timer <= 5) NightSounds.tick();
     if (state.timer <= 0) { stopTimer(); doAction('fold'); }
   }, 1000);
 }
@@ -737,17 +801,21 @@ function awardHandScore(won) {
 }
 
 function updateScoreStrip() {
-  const ns  = loadNightScore();
-  const bar = document.getElementById('ns-bar');
-  const val = document.getElementById('ns-val');
-  const hnd = document.getElementById('ns-hands');
-  const str = document.getElementById('ns-strip');
+  const ns      = loadNightScore();
+  const bar     = document.getElementById('ns-bar');
+  const val     = document.getElementById('ns-val');
+  const hnd     = document.getElementById('ns-hands');
+  const str     = document.getElementById('ns-strip');
+  const ss      = document.getElementById('ss-strip');
   if (!bar) return;
-  if (str) str.style.display = state.view === 'table' && state.wallet.connected ? 'flex' : 'none';
+  const visible = state.view === 'table' && state.wallet.connected;
+  if (str) str.style.display = visible ? 'flex' : 'none';
+  if (ss)  ss.style.display  = visible ? 'flex' : 'none';
   const pct = Math.min((ns.score / 2000) * 100, 100);
   bar.style.width = pct + '%';
   if (val) val.textContent = ns.score;
   if (hnd) hnd.textContent = ns.hands + ' hands';
+  if (visible) NightHistory.renderSessionStats();
 }
 
 // ── WebSocket Multiplayer ─────────────────────────────────────
@@ -815,6 +883,14 @@ function applyRealAction(p, action, amount) {
   h.activePlayer = nextActivePlayer(h.activePlayer);
   renderTable();
   checkStreetOver();
+}
+
+function checkStreetOver() {
+  const active = state.hand.players.filter(p => !p.folded && !p.allin);
+  if (active.length <= 1) { setTimeout(() => advanceStreet(), 600); return; }
+  const maxBet = Math.max(...state.hand.players.map(p => p.bet));
+  const allSettled = active.every(p => p.bet === maxBet && p.action !== null);
+  if (allSettled) setTimeout(() => advanceStreet(), 600);
 }
 
 function nextActivePlayer(fromSeat) {

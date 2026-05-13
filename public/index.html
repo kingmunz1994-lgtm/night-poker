@@ -18,6 +18,8 @@
   <div class="nav-right">
     <button class="btn btn-ghost btn-sm" onclick="showView('lobby')">Lobby</button>
     <button class="btn btn-ghost btn-sm" onclick="openCreateTable()">+ Create Table</button>
+    <button class="btn btn-ghost btn-sm" onclick="openHistoryModal()" title="Hand History">📋 History</button>
+    <button id="sound-toggle" class="btn btn-ghost btn-sm" onclick="NightSounds.toggle()" title="Toggle Sound">🔊</button>
     <div style="position:relative">
       <button class="btn btn-primary btn-sm" id="wallet-btn" onclick="handleWalletClick()">
         <span id="wallet-dot" style="width:7px;height:7px;border-radius:50%;background:#ef4444;display:inline-block;margin-right:5px;"></span>
@@ -153,13 +155,22 @@
     </div>
 
     <!-- Night Score strip -->
-    <div id="ns-strip" style="display:none;background:rgba(124,58,237,.07);border-bottom:1px solid rgba(124,58,237,.15);padding:6px 20px;display:flex;align-items:center;gap:12px;font-size:11px;font-family:var(--mono);">
+    <div id="ns-strip" style="display:none;background:rgba(124,58,237,.07);border-bottom:1px solid rgba(124,58,237,.15);padding:6px 20px;align-items:center;gap:12px;font-size:11px;font-family:var(--mono);">
       <span style="color:var(--glow);font-weight:700;">⭐ Night Score</span>
       <div style="flex:1;height:3px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;">
         <div id="ns-bar" style="height:100%;background:linear-gradient(90deg,var(--ink),var(--glow));border-radius:2px;width:0%;transition:width .5s;"></div>
       </div>
       <span id="ns-val" style="color:var(--glow);font-weight:700;min-width:40px;text-align:right;">0</span>
       <span id="ns-hands" style="color:var(--muted);">0 hands</span>
+    </div>
+    <!-- Session stats strip -->
+    <div id="ss-strip" style="display:none;background:rgba(0,0,0,.25);border-bottom:1px solid rgba(255,255,255,.06);padding:5px 20px;align-items:center;gap:16px;font-size:10px;font-family:var(--mono);">
+      <span style="color:var(--muted);">Session:</span>
+      <span><span id="ss-hands" style="color:var(--text);font-weight:700;">0</span> hands</span>
+      <span>Win <span id="ss-winrate" style="color:#00d68f;font-weight:700;">0%</span></span>
+      <span>VPIP <span id="ss-vpip" style="color:var(--glow);font-weight:700;">0%</span></span>
+      <span>Best pot <span id="ss-bigpot" style="color:#fbbf24;font-weight:700;">$0</span></span>
+      <button onclick="NightHistory.openFairPanel()" style="margin-left:auto;background:none;border:1px solid rgba(255,255,255,.12);border-radius:6px;color:var(--muted);font-size:10px;font-family:var(--mono);cursor:pointer;padding:2px 8px;">⊘ Verify Fair</button>
     </div>
 
     <!-- Felt table -->
@@ -297,10 +308,52 @@
   </div>
 </div>
 
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- PROVABLY FAIR MODAL                                        -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="overlay" id="ov-fair" onclick="if(event.target===this)closeModal('ov-fair')">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('ov-fair')">✕</button>
+    <div class="modal-title">⊘ Provably Fair</div>
+    <div class="modal-sub" id="fp-hand">Hand #—</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:16px;">
+      <div style="background:var(--raised);border:1px solid var(--rim);border-radius:10px;padding:12px;">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;font-family:var(--mono);letter-spacing:.08em;">YOUR XOR KEY</div>
+        <div id="fp-key" style="font-family:var(--mono);font-size:12px;word-break:break-all;color:var(--cyan);">—</div>
+      </div>
+      <div style="background:var(--raised);border:1px solid var(--rim);border-radius:10px;padding:12px;">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;font-family:var(--mono);letter-spacing:.08em;">SHA-256 COMMITMENT</div>
+        <div id="fp-commit" style="font-family:var(--mono);font-size:12px;word-break:break-all;color:var(--glow);">—</div>
+      </div>
+      <div style="background:var(--raised);border:1px solid var(--rim);border-radius:10px;padding:12px;">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;font-family:var(--mono);letter-spacing:.08em;">YOUR HOLE CARDS</div>
+        <div id="fp-cards" style="font-family:var(--mono);font-size:16px;font-weight:700;">—</div>
+      </div>
+    </div>
+    <div style="margin-top:12px;padding:10px 12px;background:rgba(0,214,143,.06);border:1px solid rgba(0,214,143,.15);border-radius:10px;font-size:11px;color:var(--text2);line-height:1.7;">
+      Your XOR key was used to shuffle the deck. The SHA-256 commitment was posted to Midnight before cards were dealt. At showdown every player reveals their key — the deck order can be reconstructed by anyone. Cheating is cryptographically impossible.
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- HAND HISTORY MODAL                                         -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="overlay" id="ov-history" onclick="if(event.target===this)closeModal('ov-history')">
+  <div class="modal" style="max-width:560px;">
+    <button class="modal-close" onclick="closeModal('ov-history')">✕</button>
+    <div class="modal-title">📋 Hand History</div>
+    <div class="modal-sub">Last 20 hands · this session</div>
+    <div id="hist-list" style="margin-top:16px;max-height:400px;overflow-y:auto;padding-right:4px;"></div>
+  </div>
+</div>
+
 <!-- ══ SCRIPTS ════════════════════════════════════════════════ -->
 <script src="js/wallet.js"></script>
 <script src="js/cards.js"></script>
 <script src="js/crypto.js"></script>
+<script src="js/sounds.js"></script>
+<script src="js/history.js"></script>
 <script src="js/game.js"></script>
 
 <script>
@@ -311,6 +364,11 @@ function handleWalletClick() {
   } else {
     openModal('ov-wallet');
   }
+}
+
+function openHistoryModal() {
+  NightHistory.renderHistoryModal();
+  openModal('ov-history');
 }
 
 // Keep pot display in sync
