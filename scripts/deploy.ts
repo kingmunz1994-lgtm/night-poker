@@ -11,6 +11,7 @@
  */
 
 import * as path  from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Buffer } from 'buffer';
 import { WebSocket } from 'ws';
 import * as Rx from 'rxjs';
@@ -110,7 +111,7 @@ async function main() {
   await Rx.firstValueFrom(ctx.wallet.state().pipe(Rx.filter(readyFilter)));
   console.log('   ✅ Synced\n');
 
-  const ContractModule = await import(path.join(ZK_CONFIG_PATH, 'contract', 'index.js'));
+  const ContractModule = await import(pathToFileURL(path.join(ZK_CONFIG_PATH, 'contract', 'index.js')).href);
   const compiled = CompiledContract
     .make('night-poker', ContractModule.Contract)
     .pipe(CompiledContract.withCompiledFileAssets(ZK_CONFIG_PATH));
